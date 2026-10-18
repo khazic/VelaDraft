@@ -45,7 +45,13 @@ def contract_defaults_from_config(cfg: dict) -> dict:
         "block_size": drafter.get("block_size"),
         "image_min_pixels": target.get("image_min_pixels"),
         "image_max_pixels": target.get("image_max_pixels"),
+        "chat_template_kwargs": target.get("chat_template_kwargs"),
     }
+
+
+def contract_chat_template_kwargs(contract: dict) -> dict:
+    """Extra ``apply_chat_template`` kwargs every prompt render uses (``{}`` when absent)."""
+    return dict((contract.get("prompt") or {}).get("chat_template_kwargs") or {})
 
 
 def ensure_contract(cfg: dict, run_dir):
@@ -379,6 +385,12 @@ def resolve_contract(
             "source": "config override validated against processor; processor defaults recorded",
         },
         "tokens": {**tokens, "source": "tokenizer, cross-checked against target config"},
+        # One render protocol for regen, capture/online and eval (e.g.
+        # Qwen3.5/3.6 need enable_thinking=false for non-thinking answers).
+        "prompt": {
+            "chat_template_kwargs": dict(defaults.get("chat_template_kwargs") or {}),
+            "source": "config target.chat_template_kwargs (absent = {})",
+        },
         "head": {
             "tie_word_embeddings": bool(getattr(config, "tie_word_embeddings", True)),
             "source": "target config.json (tie_word_embeddings; absent = True)",
@@ -448,3 +460,9 @@ def validate_yaml_against_contract(cfg: dict, contract: dict, where: str = "conf
         expected = contract["image"]["min_pixels" if key.endswith("min_pixels") else "max_pixels"]
         if value is not None and int(value) != int(expected):
             raise ContractError(f"{where}: target.{key}={value} disagrees with contract {expected}.")
+    template_kwargs = dict((cfg.get("target", {}) or {}).get("chat_template_kwargs") or {})
+    if template_kwargs != contract_chat_template_kwargs(contract):
+        raise ContractError(
+            f"{where}: target.chat_template_kwargs {template_kwargs} disagree with contract "
+            f"{contract_chat_template_kwargs(contract)}."
+        )

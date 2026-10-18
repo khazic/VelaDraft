@@ -171,9 +171,13 @@ class VLMAdapter:
 
     def finalize_processor(self, processor, contract: dict) -> None:
         """Post-construction processor tweaks shared by the encoder-decoder path."""
+        from ..contract import contract_chat_template_kwargs
+        from ..target.prompts import CHAT_TEMPLATE_KWARGS_ATTR
+
         tokenizer = getattr(processor, "tokenizer", None)
         if tokenizer is not None:
             tokenizer.padding_side = "left"
+        setattr(processor, CHAT_TEMPLATE_KWARGS_ATTR, contract_chat_template_kwargs(contract))
 
     # ---- special tokens / mask policy ----------------------------------
     def resolve_tokens(self, tokenizer, config, text_config) -> dict[str, int | None]:
