@@ -343,6 +343,15 @@ def _template_sha(processor, row: dict) -> str:
 def run_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: int | None = None) -> dict:
     run_dir = Path(run_dir)
     regen_cfg = cfg.get("regen", {})
+    backend = str(regen_cfg.get("backend", "hf")).lower()
+    if backend == "vllm":
+        # Answers were sampled by scripts/regen_vllm.py in the vLLM env; this
+        # stage only validates and assembles them (see target/regen_vllm.py).
+        from .regen_vllm import finalize_vllm_regen
+
+        return finalize_vllm_regen(cfg, run_dir, contract, limit=limit)
+    if backend != "hf":
+        raise ValueError(f"regen.backend must be 'hf' or 'vllm', got {backend!r}.")
     max_new_tokens = int(regen_cfg.get("max_new_tokens", 160))
     min_response_tokens = int(regen_cfg.get("min_response_tokens", 128))
     batch_size = int(regen_cfg.get("batch_size", 8))

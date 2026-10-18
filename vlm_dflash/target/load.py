@@ -12,6 +12,22 @@ def _dtype(name: str) -> torch.dtype:
     return mapping[name]
 
 
+def load_processor(cfg: dict, contract: dict):
+    """The contract-pinned processor alone (pixel bounds + chat-template kwargs), no weights."""
+    from transformers import AutoProcessor
+
+    from ..adapters import adapter_for_contract
+
+    adapter = adapter_for_contract(contract)
+    processor = AutoProcessor.from_pretrained(
+        contract["target"]["model_path"],
+        **adapter.processor_kwargs(contract),
+        local_files_only=bool(cfg.get("target", {}).get("local_files_only", True)),
+    )
+    adapter.finalize_processor(processor, contract)
+    return processor
+
+
 def load_target(cfg: dict, contract: dict, device: str | None = None):
     """Return ``(model, processor)`` for the contract's target checkpoint.
 
@@ -19,8 +35,6 @@ def load_target(cfg: dict, contract: dict, device: str | None = None):
     processor is pinned to the contract's effective pixel bounds so regen,
     capture and eval all preprocess images identically.
     """
-    from transformers import AutoProcessor
-
     from ..adapters import adapter_for_contract
 
     adapter = adapter_for_contract(contract)
@@ -48,12 +62,7 @@ def load_target(cfg: dict, contract: dict, device: str | None = None):
         local_files_only=local_only,
         **load_kwargs,
     )
-    processor = AutoProcessor.from_pretrained(
-        model_path,
-        **adapter.processor_kwargs(contract),
-        local_files_only=local_only,
-    )
-    adapter.finalize_processor(processor, contract)
+    processor = load_processor(cfg, contract)
     if device_map is None:
         model.to(device or target_cfg.get("device", "cuda:0"))
     model.eval()

@@ -1,0 +1,62 @@
+# Shared frozen contract of the a100_qwen36_moe_400k_s42 matrix (Qwen3.6-35B-A3B
+# target, 400K OneVision requests, online teacher features). Every method config
+# merges over this file; the dataset/regen blocks must stay identical across
+# rows so all seven reuse one corpus (the stage digests depend on them).
+#
+#   VLM_DFLASH_TARGET  local Qwen/Qwen3.6-35B-A3B checkpoint (pinned revision)
+#   VELA_POOL          output dir of scripts/build_onevision_pool.py
+target:
+  model: ${VLM_DFLASH_TARGET}
+  dtype: bfloat16
+  attn_implementation: sdpa
+  # 35B BF16 (~67 GB) does not fit next to the drafter on one 80 GB card.
+  device_map: auto
+  max_memory: {0: 36GiB, 1: 36GiB}
+  local_files_only: true
+  # 64..1024 visual tokens per image (patch 16, merge 2); the processor default
+  # (16M pixels) would allow 16384 and break the 4096-token window.
+  image_min_pixels: 65536
+  image_max_pixels: 1048576
+  chat_template_kwargs:
+    enable_thinking: false
+
+# Controlled dense drafter shared by every row (method blocks add their heads).
+drafter:
+  num_hidden_layers: 3
+  intermediate_size: 6144
+  block_size: 8
+  num_anchors: 512
+  # First reserved embedding row past the tokenizer (248077 tokens); the
+  # tokenizer can never emit it.
+  mask_token_id: 248077
+  attention_backend: flex_attention
+  spatial_rope_enabled: true
+  spatial_rope_mode: replace
+
+dataset:
+  source: jsonl
+  path: ${VELA_POOL}/pool.jsonl
+  split_field: split
+  # Train candidates = sum(ceil(quota * 1.12)); regen.select cuts them to 400K.
+  slice: 448000
+  seed: 42
+  image_link_mode: hardlink
+
+regen:
+  backend: vllm
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  presence_penalty: 1.5
+  repetition_penalty: 1.0
+  max_new_tokens: 2048
+  min_response_tokens: 8
+  # Prompts longer than this are dropped so prompt + answer fit window_tokens
+  # with a natural EOS (length-capped answers are dropped, never re-labelled).
+  max_prompt_tokens: 2048
+  window_tokens: 4096
+  seed: 42
+  multi_turn_mode: last_turn_only
+  select:
+    meta: ${VELA_POOL}/pool_meta.jsonl
+    quotas: {general: 140000, ocr: 120000, chart: 60000, reasoning: 80000}
