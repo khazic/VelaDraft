@@ -37,8 +37,8 @@ dataset:
   source: jsonl
   path: ${VELA_POOL}/pool.jsonl
   split_field: split
-  # Train candidates = sum(ceil(quota * 1.12)); regen.select cuts them to 400K.
-  slice: 448000
+  # Train candidates = sum(ceil(quota * group oversample)); regen.select cuts them to 400K.
+  slice: 660000
   seed: 42
   image_link_mode: hardlink
 
