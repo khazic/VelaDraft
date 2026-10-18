@@ -11,7 +11,7 @@ target:
   attn_implementation: sdpa
   # 35B BF16 (~67 GB) does not fit next to the drafter on one 80 GB card.
   device_map: auto
-  max_memory: {0: 40GiB, 1: 32GiB}
+  max_memory: {0: 44GiB, 1: 40GiB}
   local_files_only: true
   # 64..1024 visual tokens per image (patch 16, merge 2); the processor default
   # (16M pixels) would allow 16384 and break the 4096-token window.

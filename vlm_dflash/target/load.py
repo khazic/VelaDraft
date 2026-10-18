@@ -62,6 +62,15 @@ def load_target(cfg: dict, contract: dict, device: str | None = None):
         local_files_only=local_only,
         **load_kwargs,
     )
+    if device_map is not None:
+        # accelerate silently offloads what does not fit under max_memory to cpu
+        # or disk (meta tensors); a frozen teacher must be fully on the GPUs.
+        offloaded = sorted({str(p.device) for p in model.parameters() if p.device.type in ("meta", "cpu")})
+        if offloaded:
+            raise ValueError(
+                f"target.device_map left target parameters on {offloaded} (offloaded); raise target.max_memory "
+                "so the whole target fits on the mapped GPUs."
+            )
     processor = load_processor(cfg, contract)
     if device_map is None:
         model.to(device or target_cfg.get("device", "cuda:0"))

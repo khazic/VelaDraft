@@ -13,7 +13,7 @@ target:
   dtype: bfloat16
   attn_implementation: sdpa
   device_map: auto
-  max_memory: {0: 40GiB, 1: 32GiB}
+  max_memory: {0: 44GiB, 1: 40GiB}
   local_files_only: true
   image_min_pixels: 65536
   image_max_pixels: 1048576
