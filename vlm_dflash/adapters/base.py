@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import torch
 
-from ..contract import ContractError
+from ..contract import ContractError, interleaved_mrope_overflow
 
 def _mapping_value(source, key):
     """Read ``key`` from a dict-like or attribute-like source (SizeDict etc.)."""
@@ -92,7 +92,10 @@ class VLMAdapter:
     info: AdapterInfo
 
     # ---- model / processor loading -------------------------------------
-    def load_model(self, model_path: str, *, dtype, attn_implementation: str, local_files_only: bool):
+    def load_model(
+        self, model_path: str, *, dtype, attn_implementation: str, local_files_only: bool, **load_kwargs
+    ):
+        """Load the target; ``load_kwargs`` (e.g. ``device_map``/``max_memory``) go to ``from_pretrained``."""
         import transformers
 
         model_class = getattr(transformers, self.info.model_class, None)
@@ -106,6 +109,7 @@ class VLMAdapter:
             dtype=dtype,
             attn_implementation=attn_implementation,
             local_files_only=local_files_only,
+            **load_kwargs,
         )
 
     def processor_kwargs(self, contract: dict) -> dict:
@@ -251,9 +255,16 @@ class VLMAdapter:
             raise ContractError(
                 f"YAML spatial_rope_sections {default_sections} disagree with target mrope_section {sections}."
             )
-        if 2 * sum(sections) != head_dim:
+        # Partial-rotary families (Qwen3.5/3.6: factor 0.25 -> 64 of 256 channels)
+        # rotate only the leading ``rotary_dim`` channels of each head.
+        partial_rotary_factor = float(
+            rope.get("partial_rotary_factor", getattr(text_config, "partial_rotary_factor", None) or 1.0)
+        )
+        rotary_dim = int(head_dim * partial_rotary_factor)
+        if 2 * sum(sections) != rotary_dim:
             raise ContractError(
-                f"mrope_section {sections} doubled sum must equal head_dim {head_dim} for spatial-rope DFlash."
+                f"mrope_section {sections} doubled sum must equal the rotary dim {rotary_dim} "
+                f"(head_dim {head_dim} x partial_rotary_factor {partial_rotary_factor}) for spatial-rope DFlash."
             )
         interleaved = bool(rope.get("mrope_interleaved", False))
         default_interleaved = defaults.get("spatial_rope_interleaved")
@@ -263,19 +274,24 @@ class VLMAdapter:
                 f"mrope_interleaved {interleaved}."
             )
         if interleaved:
-            half = head_dim // 2
-            for axis in (1, 2):
-                if 3 * sections[axis] > half:
-                    raise ContractError(
-                        f"Interleaved MRoPE needs 3*mrope_section[axis] <= head_dim/2; axis {axis} has "
-                        f"3*{sections[axis]} > {half}."
-                    )
+            half = rotary_dim // 2
+            axis = interleaved_mrope_overflow(sections, half)
+            if axis is not None:
+                raise ContractError(
+                    f"Interleaved MRoPE axis {axis} (mrope_section {sections[axis]}) overflows the "
+                    f"{half} half-rotary channels."
+                )
         return {
             "type": rope.get("type") or rope.get("rope_type"),
             "mode": "mrope",
             "sections": sections,
             "interleaved": interleaved,
-            "source": f"target {rope_source}.mrope_section + mrope_interleaved (absent = False)",
+            "partial_rotary_factor": partial_rotary_factor,
+            "rotary_dim": rotary_dim,
+            "source": (
+                f"target {rope_source}.mrope_section + mrope_interleaved (absent = False) + "
+                "partial_rotary_factor (absent = 1.0)"
+            ),
         }
 
     # ---- multimodal position ids ---------------------------------------

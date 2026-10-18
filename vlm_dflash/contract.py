@@ -105,6 +105,21 @@ def build_target_layer_ids(num_target_layers: int, num_draft_layers: int) -> lis
     return [int(start + round(i * step)) for i in range(num_draft_layers)]
 
 
+def interleaved_mrope_overflow(sections, half_dim: int) -> int | None:
+    """First spatial axis whose interleaved MRoPE channels overflow ``half_dim``.
+
+    HF ``apply_interleaved_mrope`` writes axis ``a`` (1 = height, 2 = width) at
+    ``slice(a, 3 * sections[a], 3)`` of the half-rotary table, so an axis fits
+    when its last channel ``a + 3 * (sections[a] - 1)`` stays below
+    ``half_dim``. Qwen3.5/3.6 (``[11, 11, 10]`` over 32 channels) fits even
+    though ``3 * 11 > 32``. Returns ``None`` when both axes fit.
+    """
+    for axis in (1, 2):
+        if axis + 3 * (int(sections[axis]) - 1) >= int(half_dim):
+            return axis
+    return None
+
+
 def contract_capture_layer_ids(contract: dict) -> list[int]:
     """The captured layer list of a contract or feature manifest (ordered).
 
@@ -331,6 +346,9 @@ def resolve_contract(
             "mode": rope_info["mode"],
             "sections": sections,
             "interleaved": rope_info["interleaved"],
+            # Absent for 1-D families (SmolVLM); MRoPE families always record them.
+            "partial_rotary_factor": rope_info.get("partial_rotary_factor"),
+            "rotary_dim": rope_info.get("rotary_dim"),
             "source": rope_info["source"],
         },
         "layers": {

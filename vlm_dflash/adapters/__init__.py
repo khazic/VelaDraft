@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from .base import AdapterInfo, VLMAdapter
 from .qwen25_vl import Qwen25VLAdapter
+from .qwen3_5_moe import Qwen35MoeAdapter
 from .qwen3_vl import Qwen3VLAdapter
 from .smolvlm import SmolVLMAdapter
 
-_ADAPTERS: tuple[VLMAdapter, ...] = (Qwen25VLAdapter(), Qwen3VLAdapter(), SmolVLMAdapter())
+_ADAPTERS: tuple[VLMAdapter, ...] = (Qwen25VLAdapter(), Qwen3VLAdapter(), Qwen35MoeAdapter(), SmolVLMAdapter())
 
 
 class UnknownTargetError(RuntimeError):
@@ -58,6 +59,7 @@ __all__ = [
     "AdapterInfo",
     "VLMAdapter",
     "Qwen25VLAdapter",
+    "Qwen35MoeAdapter",
     "Qwen3VLAdapter",
     "SmolVLMAdapter",
     "UnknownTargetError",

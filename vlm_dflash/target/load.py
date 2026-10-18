@@ -27,11 +27,26 @@ def load_target(cfg: dict, contract: dict, device: str | None = None):
     target_cfg = cfg.get("target", {})
     model_path = contract["target"]["model_path"]
     local_only = bool(target_cfg.get("local_files_only", True))
+    # ``target.device_map`` shards a target too large for one GPU (e.g. a 35B
+    # BF16 MoE on 80 GB cards) across devices via accelerate; ``max_memory``
+    # caps each device so the drafter keeps room on its own card.
+    device_map = target_cfg.get("device_map")
+    load_kwargs: dict = {}
+    if device_map is not None:
+        if device is not None:
+            raise ValueError("load_target got both an explicit device and target.device_map; pick one.")
+        load_kwargs["device_map"] = device_map
+        max_memory = target_cfg.get("max_memory")
+        if max_memory is not None:
+            load_kwargs["max_memory"] = {
+                (int(key) if str(key).isdigit() else str(key)): value for key, value in max_memory.items()
+            }
     model = adapter.load_model(
         model_path,
         dtype=_dtype(target_cfg.get("dtype", "bfloat16")),
         attn_implementation=target_cfg.get("attn_implementation", "sdpa"),
         local_files_only=local_only,
+        **load_kwargs,
     )
     processor = AutoProcessor.from_pretrained(
         model_path,
@@ -39,7 +54,8 @@ def load_target(cfg: dict, contract: dict, device: str | None = None):
         local_files_only=local_only,
     )
     adapter.finalize_processor(processor, contract)
-    model.to(device or target_cfg.get("device", "cuda:0"))
+    if device_map is None:
+        model.to(device or target_cfg.get("device", "cuda:0"))
     model.eval()
     model.requires_grad_(False)
     return model, processor
