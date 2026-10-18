@@ -1,3 +1,6 @@
+"""Turn-start fallback for multi-turn capture spans (Qwen3.5/3.6 templates)."""
+
+from types import SimpleNamespace
 
 
 def test_turn_start_positions_follow_im_start_markers():
