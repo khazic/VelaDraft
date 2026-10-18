@@ -1,0 +1,114 @@
+# LLaVA-OneVision-Data subset -> coverage-group mapping for the Qwen3.6-35B-A3B
+# formal matrix (400K valid single-image requests). Quotas are the frozen
+# contract targets; subsets are sampled with weights proportional to
+# rows ** subset_weight_power inside each group, so a few very large synthetic
+# subsets (dvqa, figureqa, k12_printing, ...) cannot fill a group alone.
+#
+# Excluded: text-only subsets (magpie_pro*, Evol-Instruct-GPT4-Turbo, mathqa)
+# and subsets shipped as tar.gz + json instead of parquet (cambrian(filtered),
+# ureader_kg, ureader_qa).
+seed: 42
+subset_weight_power: 0.5
+dev_size: 512
+test_size: 512
+groups:
+  general:
+    description: General visual QA / scenes / descriptions
+    quota: 140000
+    subsets:
+      - sharegpt4v(coco)
+      - sharegpt4v(llava)
+      - sharegpt4v(sam)
+      - sharegpt4v(knowledge)
+      - sharegpt4o
+      - allava_instruct_laion4v
+      - allava_instruct_vflan4v
+      - vision_flan(filtered)
+      - llava_wild_4v_12k_filtered
+      - llava_wild_4v_39k_filtered
+      - lrv_normal(filtered)
+      - aokvqa(cauldron,llava_format)
+      - visual7w(cauldron,llava_format)
+      - vsr(cauldron,llava_format)
+      - tallyqa(cauldron,llava_format)
+      - image_textualization(filtered)
+      - hateful_memes(cauldron,llava_format)
+      - VizWiz(MathV360K)
+  ocr:
+    description: OCR / documents / interfaces
+    quota: 120000
+    subsets:
+      - ureader_cap
+      - ureader_ie
+      - infographic_vqa
+      - infographic_vqa_llava_format
+      - infographic(gpt4v)
+      - textocr(gpt4v)
+      - textcaps
+      - st_vqa(cauldron,llava_format)
+      - rendered_text(cauldron)
+      - screen2words(cauldron)
+      - websight(cauldron)
+      - iam(cauldron)
+      - iiit5k
+      - sroie
+      - chrome_writting
+      - llavar_gpt4_20k
+      - visualmrc(cauldron)
+      - hme100k
+      - orand_car_a
+      - k12_printing
+  chart:
+    description: Charts / tables / quantitative relationships
+    quota: 60000
+    subsets:
+      - chartqa(cauldron,llava_format)
+      - chart2text(cauldron)
+      - dvqa(cauldron,llava_format)
+      - figureqa(cauldron,llava_format)
+      - FigureQA(MathV360K)
+      - lrv_chart
+      - vistext(cauldron)
+      - mapqa(cauldron,llava_format)
+      - MapQA(MathV360K)
+      - hitab(cauldron,llava_format)
+      - robut_sqa(cauldron)
+      - robut_wikisql(cauldron)
+      - robut_wtq(cauldron,llava_format)
+      - multihiertt(cauldron)
+      - tabmwp(cauldron)
+      - TabMWP(MathV360K)
+      - diagram_image_to_text(cauldron)
+  reasoning:
+    description: Visual reasoning / mathematics / knowledge
+    quota: 80000
+    subsets:
+      - geo170k(align)
+      - geo170k(qa)
+      - geo3k
+      - Geometry3K(MathV360K)
+      - GeoQA+(MathV360K)
+      - GEOS(MathV360K)
+      - UniGeo(MathV360K)
+      - mavis_math_metagen
+      - mavis_math_rule_geo
+      - MathV360K_TQA
+      - MathV360K_VQA-AS
+      - MathV360K_VQA-RAD
+      - CLEVR-Math(MathV360K)
+      - Super-CLEVR(MathV360K)
+      - clevr(cauldron,llava_format)
+      - raven(cauldron)
+      - iconqa(cauldron,llava_format)
+      - IconQA(MathV360K)
+      - scienceqa(cauldron,llava_format)
+      - scienceqa(nona_context)
+      - tqa(cauldron,llava_format)
+      - ai2d(cauldron,llava_format)
+      - ai2d(gpt4v)
+      - ai2d(internvl)
+      - intergps(cauldron,llava_format)
+      - geomverse(cauldron)
+      - PMC-VQA(MathV360K)
+      - vqarad(cauldron,llava_format)
+      - VisualWebInstruct(filtered)

@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from collections import Counter
 from pathlib import Path
 
 from ..utils import (
@@ -31,11 +32,42 @@ from ..utils import (
     log,
     now_iso,
     read_json,
+    read_jsonl,
     sha256_file,
     sha256_json,
     write_json,
     write_jsonl,
 )
+
+#: Accepted ``dataset.split_field`` values (and their aliases).
+_SPLIT_ALIASES = {"train": "train", "val": "val", "dev": "val", "validation": "val", "test": "test"}
+
+
+def _predefined_splits(dataset_cfg: dict, pool: list[dict]) -> dict[str, list[int]] | None:
+    """Pool indices per split from ``dataset.split_field`` (jsonl source), or ``None``.
+
+    Lets a curated pool freeze its own train/val/test membership (e.g. stratified
+    dev/test frozen before the training corpus) instead of the seeded random
+    image-grouped split. Every row must carry one of ``train``/``val``
+    (``dev``/``validation``)/``test``.
+    """
+    field = dataset_cfg.get("split_field")
+    if not field:
+        return None
+    if dataset_cfg.get("source") != "jsonl":
+        raise ValueError("dataset.split_field is only supported for dataset.source=jsonl.")
+    labels = [row.get(field) for row in read_jsonl(dataset_cfg["path"])]
+    splits: dict[str, list[int]] = {"train": [], "val": [], "test": []}
+    for index, sample in enumerate(pool):
+        raw = labels[sample["src_index"]]
+        name = _SPLIT_ALIASES.get(str(raw).lower()) if raw is not None else None
+        if name is None:
+            raise ValueError(
+                f"dataset.split_field={field!r}: row {sample['src_index']} has split {raw!r}; "
+                f"expected one of {sorted(_SPLIT_ALIASES)}."
+            )
+        splits[name].append(index)
+    return splits
 
 
 def _iter_llava_instruct(cfg: dict) -> list[dict]:
@@ -284,9 +316,18 @@ def build_dataset(cfg: dict, data_dir: str | Path, limit: int | None = None) -> 
     pool = _SOURCES[source](cfg)
     log(f"prepare_data: source={source} pool={len(pool)}")
     seed = int(dataset_cfg.get("seed", 42))
-    train_size = int(limit if limit is not None else dataset_cfg["slice"])
-    val_size = int(dataset_cfg.get("val_size", 64))
-    test_size = int(dataset_cfg.get("test_size", 0))
+    predefined = _predefined_splits(dataset_cfg, pool)
+    if limit is not None:
+        train_size = int(limit)
+    elif predefined is not None and dataset_cfg.get("slice") is None:
+        train_size = len(predefined["train"])
+    else:
+        train_size = int(dataset_cfg["slice"])
+    if predefined is not None:
+        val_size, test_size = len(predefined["val"]), len(predefined["test"])
+    else:
+        val_size = int(dataset_cfg.get("val_size", 64))
+        test_size = int(dataset_cfg.get("test_size", 0))
     link_mode = str(dataset_cfg.get("image_link_mode", "copy")).lower()
     if link_mode not in LINK_MODES:
         raise ValueError(f"dataset.image_link_mode must be one of {LINK_MODES}, got {link_mode!r}.")
@@ -347,31 +388,47 @@ def build_dataset(cfg: dict, data_dir: str | Path, limit: int | None = None) -> 
     for index in range(len(pool)):
         groups.setdefault(find(index), []).append(index)
 
-    rng = random.Random(seed)
-    group_order = sorted(groups)
-    rng.shuffle(group_order)
-    train_idx: list[int] = []
-    val_idx: list[int] = []
-    test_idx: list[int] = []
-    for root in group_order:
-        members = groups[root]
-        if len(test_idx) < test_size:
-            test_idx.extend(members)
-        elif len(val_idx) < val_size:
-            val_idx.extend(members)
-        else:
-            train_idx.extend(members)
-            if len(train_idx) >= train_size:
-                break
-    # Shuffle each split once more so file order is a seeded random order (the
-    # evaluator's periodic subset is a fixed prefix of val.jsonl and must not
-    # inherit the source annotation's block structure).
-    rng.shuffle(train_idx)
-    rng.shuffle(val_idx)
-    rng.shuffle(test_idx)
+    if predefined is not None:
+        # Rows carry their own split; the image-content groups only verify it:
+        # one image's rows must all live in one split.
+        split_label = {index: name for name, indices in predefined.items() for index in indices}
+        spanning = [root for root, members in groups.items() if len({split_label[m] for m in members}) > 1]
+        if spanning:
+            raise ValueError(
+                f"dataset.split_field: {len(spanning)} image-content group(s) span more than one split "
+                f"(first pool rows: {[groups[root][0] for root in spanning[:5]]}); splits must be media-disjoint."
+            )
+        # File order is kept: a predefined split is already in its intended order.
+        train_idx = predefined["train"][:train_size]
+        val_idx, test_idx = predefined["val"], predefined["test"]
+        split_mode = f"predefined by '{dataset_cfg['split_field']}'"
+    else:
+        rng = random.Random(seed)
+        group_order = sorted(groups)
+        rng.shuffle(group_order)
+        train_idx = []
+        val_idx = []
+        test_idx = []
+        for root in group_order:
+            members = groups[root]
+            if len(test_idx) < test_size:
+                test_idx.extend(members)
+            elif len(val_idx) < val_size:
+                val_idx.extend(members)
+            else:
+                train_idx.extend(members)
+                if len(train_idx) >= train_size:
+                    break
+        # Shuffle each split once more so file order is a seeded random order (the
+        # evaluator's periodic subset is a fixed prefix of val.jsonl and must not
+        # inherit the source annotation's block structure).
+        rng.shuffle(train_idx)
+        rng.shuffle(val_idx)
+        rng.shuffle(test_idx)
+        split_mode = f"image-grouped split, seed={seed}"
     log(
         f"prepare_data: groups={len(groups)} train={len(train_idx)} val={len(val_idx)} "
-        f"test={len(test_idx)} (image-grouped split, seed={seed})"
+        f"test={len(test_idx)} ({split_mode})"
     )
 
     manifest_rows = []
@@ -446,8 +503,8 @@ def build_dataset(cfg: dict, data_dir: str | Path, limit: int | None = None) -> 
             )
         return rows_out
 
-    selected_ids = [pool[index]["sample_id"] for index in train_idx + val_idx + test_idx]
-    duplicates = sorted({sample_id for sample_id in selected_ids if selected_ids.count(sample_id) > 1})
+    id_counts = Counter(pool[index]["sample_id"] for index in train_idx + val_idx + test_idx)
+    duplicates = sorted(sample_id for sample_id, count in id_counts.items() if count > 1)
     if duplicates:
         log(
             "prepare_data: warning: duplicate sample id(s) in the selected rows "
