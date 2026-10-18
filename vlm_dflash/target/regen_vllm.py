@@ -96,8 +96,13 @@ _WORKER: dict = {}
 
 
 def _worker_init(cfg: dict, contract: dict, media_dir: str) -> None:
+    import torch
+
     from .load import load_processor
 
+    # One thread per worker: the image processor's torch ops would otherwise
+    # each grab every core and N workers oversubscribe the host N-fold.
+    torch.set_num_threads(1)
     _WORKER.update(processor=load_processor(cfg, contract), media_dir=Path(media_dir))
 
 
