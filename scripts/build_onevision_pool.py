@@ -254,7 +254,9 @@ def main() -> None:
     parser.add_argument("--media-dir", required=True, help="directory receiving one file per image hash")
     parser.add_argument("--exclude-media", action="append", default=[], help="file of image sha256 to drop")
     parser.add_argument("--exclude-dhash", action="append", default=[], help="file of image dHash values to drop")
-    parser.add_argument("--oversample", type=float, default=1.12, help="train candidates per quota row")
+    parser.add_argument(
+        "--oversample", type=float, default=1.12, help="train candidates per quota row (groups may override)"
+    )
     parser.add_argument("--draw-margin", type=float, default=1.3, help="raw draws per needed row")
     parser.add_argument("--workers", type=int, default=16)
     args = parser.parse_args()
@@ -268,7 +270,10 @@ def main() -> None:
     quotas = {name: int(group["quota"]) for name, group in spec["groups"].items()}
     dev_quota = _split_quota(int(spec.get("dev_size", 512)), quotas)
     test_quota = _split_quota(int(spec.get("test_size", 512)), quotas)
-    train_quota = {name: math.ceil(quota * args.oversample) for name, quota in quotas.items()}
+    # Per-group ``oversample`` (YAML) sizes each group's regen candidates from its
+    # measured keep rate; ``--oversample`` is the default for groups without one.
+    oversample = {name: float(group.get("oversample", args.oversample)) for name, group in spec["groups"].items()}
+    train_quota = {name: math.ceil(quota * oversample[name]) for name, quota in quotas.items()}
 
     def read_set(paths: list[str]) -> set[str]:
         return {line.strip() for path in paths for line in Path(path).read_text().splitlines() if line.strip()}
@@ -384,7 +389,7 @@ def main() -> None:
     stats = {
         "seed": seed,
         "subset_weight_power": power,
-        "oversample": args.oversample,
+        "oversample": oversample,
         "draw_margin": args.draw_margin,
         "plan": plan,
         "num_drawn": sum(len(t["rows"]) for t in tasks),

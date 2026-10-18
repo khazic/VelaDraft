@@ -4,6 +4,11 @@
 # rows ** subset_weight_power inside each group, so a few very large synthetic
 # subsets (dvqa, figureqa, k12_printing, ...) cannot fill a group alone.
 #
+# Per-group oversample = regen candidates per quota row, sized from the ~1K
+# pilot keep rates (general 0.72, ocr 0.80, chart 0.55, reasoning 0.68; most
+# drops are short-answer prompts below regen.min_response_tokens) with ~15%
+# margin. regen.select then takes each quota in pool order.
+#
 # Excluded: text-only subsets (magpie_pro*, Evol-Instruct-GPT4-Turbo, mathqa)
 # and subsets shipped as tar.gz + json instead of parquet (cambrian(filtered),
 # ureader_kg, ureader_qa).
@@ -15,6 +20,7 @@ groups:
   general:
     description: General visual QA / scenes / descriptions
     quota: 140000
+    oversample: 1.6
     subsets:
       - sharegpt4v(coco)
       - sharegpt4v(llava)
@@ -37,6 +43,7 @@ groups:
   ocr:
     description: OCR / documents / interfaces
     quota: 120000
+    oversample: 1.45
     subsets:
       - ureader_cap
       - ureader_ie
@@ -61,6 +68,7 @@ groups:
   chart:
     description: Charts / tables / quantitative relationships
     quota: 60000
+    oversample: 2.1
     subsets:
       - chartqa(cauldron,llava_format)
       - chart2text(cauldron)
@@ -82,6 +90,7 @@ groups:
   reasoning:
     description: Visual reasoning / mathematics / knowledge
     quota: 80000
+    oversample: 1.7
     subsets:
       - geo170k(align)
       - geo170k(qa)
