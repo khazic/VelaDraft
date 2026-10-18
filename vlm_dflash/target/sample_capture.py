@@ -417,6 +417,7 @@ def _prepare_multi_turn(
         # and the last assistant turn spans through the end of the sequence.
         target_index = regenerated_indices[-1]
         turn_spans, previous_end = [], 0
+        turn_starts = None
         for turn_index in range(len(conversations)):
             if turn_index == target_index:
                 end = len(stored_full_ids)
@@ -431,12 +432,22 @@ def _prepare_multi_turn(
                     add_generation_prompt=False,
                 )
                 prefix_ids = prefix_inputs["input_ids"][0].tolist()
-                if stored_full_ids[: len(prefix_ids)] != prefix_ids:
-                    raise RuntimeError(
-                        f"Prefix render drift for sample {row.get('id')} at turn {turn_index}: the chat "
-                        "template does not reproduce the committed prefix; refusing to store misaligned ids."
-                    )
-                end = len(prefix_ids)
+                if stored_full_ids[: len(prefix_ids)] == prefix_ids:
+                    end = len(prefix_ids)
+                else:
+                    # Some templates render a conversation's trailing assistant turn
+                    # differently from a historical one (Qwen3.5/3.6 add an empty
+                    # thinking block), so a prefix ending in an assistant turn is not
+                    # a token prefix. The full render was verified above; take the
+                    # boundary from the turn-start markers instead.
+                    if turn_starts is None:
+                        turn_starts = _turn_start_positions(processor, stored_full_ids, len(conversations))
+                    if turn_starts is None:
+                        raise RuntimeError(
+                            f"Prefix render drift for sample {row.get('id')} at turn {turn_index}: the chat "
+                            "template does not reproduce the committed prefix; refusing to store misaligned ids."
+                        )
+                    end = turn_starts[turn_index + 1]
             turn_spans.append((min(previous_end, keep), min(end, keep)))
             previous_end = end
         if previous_end != len(stored_full_ids):
@@ -474,6 +485,20 @@ def _prepare_multi_turn(
             "multi_turn_mode": mode,
         },
     }
+
+
+def _turn_start_positions(processor, full_ids: list[int], num_turns: int) -> list[int] | None:
+    """Token positions where each conversation turn starts (``<|im_start|>`` markers).
+
+    Returns ``None`` when the tokenizer has no such marker or the sequence does
+    not hold exactly one marker per turn, so callers keep failing loudly.
+    """
+    tokenizer = getattr(processor, "tokenizer", None)
+    marker = tokenizer.convert_tokens_to_ids("<|im_start|>") if tokenizer is not None else None
+    if marker is None or marker < 0 or marker == getattr(tokenizer, "unk_token_id", None):
+        return None
+    starts = [index for index, token in enumerate(full_ids) if token == marker]
+    return starts if len(starts) == num_turns else None
 
 
 def prepare_sample_record(
