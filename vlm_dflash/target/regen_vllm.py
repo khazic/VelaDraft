@@ -175,6 +175,39 @@ def _verify_last_turn_render(processor, row: dict, media_dir: Path, full_ids: li
     _verify_full_render(processor, row, images, full_ids, {target_index: answer_text})
 
 
+def _worker_render_check(item: tuple) -> tuple[str, str | None]:
+    """Full-render check of one regenerated last turn in a pool worker: ``(id, error or None)``."""
+    row_id, row, full_ids, target_index, answer_text = item
+    try:
+        _verify_last_turn_render(
+            _WORKER["processor"], row, _WORKER["media_dir"], full_ids, target_index, answer_text
+        )
+    except RuntimeError as error:
+        return row_id, str(error)[:300]
+    return row_id, None
+
+
+def _render_drift(cfg: dict, contract: dict, media_dir: Path, checks: list[tuple], workers: int) -> dict[str, str]:
+    """Rows whose prompt + sampled answer ids are not one template render (``id -> error``).
+
+    Sampling can emit a non-canonical tokenization of its own text, so re-rendering
+    the conversation tokenizes the answer differently. Such rows are dropped (and
+    replaced from the pool) rather than stored with ids no render reproduces.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    if not checks:
+        return {}
+    drift = {}
+    with ProcessPoolExecutor(
+        max_workers=workers, initializer=_worker_init, initargs=(cfg, contract, str(media_dir))
+    ) as pool:
+        for row_id, error in pool.map(_worker_render_check, checks, chunksize=64):
+            if error is not None:
+                drift[row_id] = error
+    return drift
+
+
 def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: int | None = None) -> dict:
     """Build ``regen/`` from vLLM outputs (the ``run_regen`` body for ``backend: vllm``)."""
     from .load import load_processor
@@ -201,7 +234,7 @@ def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: i
     stop_ids = target_stop_ids(contract["target"]["model_path"])
     stop_set = set(stop_ids)
 
-    kept, skipped = [], []
+    kept, skipped, render_checks = [], [], []
     for row in rows:
         row_id = str(row["id"])
         request = requests[row_id]
@@ -241,7 +274,7 @@ def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: i
         else:
             target_index = int(request["target_index"])
             full_ids = prompt_ids + answer_ids
-            _verify_last_turn_render(processor, row, media_dir, full_ids, target_index, answer_text)
+            render_checks.append((row_id, row, full_ids, target_index, answer_text))
             record = {
                 "id": row_id,
                 "conversations": row["conversations"],
@@ -267,6 +300,12 @@ def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: i
                 },
             }
         kept.append(record)
+
+    drift = _render_drift(cfg, contract, media_dir, render_checks, int(regen_cfg.get("finalize_workers", 32)))
+    if drift:
+        kept = [record for record in kept if record["id"] not in drift]
+        skipped.extend({"id": row_id, "reason": "render_drift", "error": error} for row_id, error in drift.items())
+        log(f"regen_vllm: {len(drift)} multi-turn row(s) dropped for render drift")
 
     selection, surplus, group_of = _select_quotas(regen_cfg.get("select"), kept)
     if selection is not None:
