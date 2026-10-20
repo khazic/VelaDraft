@@ -115,7 +115,10 @@ BASE: dict = {
     "train": {
         "device": "cuda:0",
         "feature_mode": "online",
-        "online_batch_size": 2,
+        # One target forward per row: batched capture makes BF16 vision features
+        # depend on the batch's other images (up to 7% for a small image, fp32
+        # agrees to 3e-5), while batch 1 matches the batch-1 inference prefill.
+        "online_batch_size": 1,
         "online_feature_cache_gb": 0,
         "num_workers": 0,
         "micro_batch_size": MICRO_BATCH,

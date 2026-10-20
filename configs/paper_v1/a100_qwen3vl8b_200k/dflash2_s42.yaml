@@ -52,7 +52,7 @@ capture: {seq_length: 4096, dtype: bfloat16, store_final_hidden: true, visual_pa
 train:
   device: cuda:0
   feature_mode: online
-  online_batch_size: 2
+  online_batch_size: 1
   online_feature_cache_gb: 0
   num_workers: 0
   micro_batch_size: 2

@@ -349,8 +349,12 @@ def batch_parity_section(model, processor, contract: dict, rows: list[dict], med
     exact = all(v["ids_equal"] and v["loss_mask_equal"] and v["position3_equal"] for d in out.values() for v in d.values())
     worst = max(layer["rel_l2"] for d in out.values() for v in d.values() for layer in v["hidden"].values())
     worst_final = max(v["final_hidden_rel_l2"] for d in out.values() for v in d.values())
+    # Informational: the formal rows capture with online_batch_size 1 (ids, masks
+    # and positions must still be identical in a batched capture).
     gate("online_batch_feature_parity", exact and worst < 2e-2 and worst_final < 2e-2,
-         {"ids_masks_positions_identical": exact, "worst_rel_l2_hidden": worst, "worst_rel_l2_final": worst_final})
+         {"ids_masks_positions_identical": exact, "worst_rel_l2_hidden": worst, "worst_rel_l2_final": worst_final},
+         mandatory=False)
+    gate("online_batch_ids_masks_positions", exact, {"identical": exact})
     return batched_by_size
 
 
@@ -386,7 +390,8 @@ def loss_parity_section(contract: dict, model, args, batched_by_size: dict) -> N
     report["online_batch_loss_parity"] = detail
     gate("online_batch_loss_parity", all(
         d["valid_blocks"][0] == d["valid_blocks"][1] and d["valid_tokens"][0] == d["valid_tokens"][1]
-        and d["loss_rel_diff"] < 1e-2 and d["greedy_agreement"] >= 0.99 for d in detail.values()), detail)
+        and d["loss_rel_diff"] < 1e-2 and d["greedy_agreement"] >= 0.99 for d in detail.values()), detail,
+         mandatory=False)
     del module
     torch.cuda.empty_cache()
 
