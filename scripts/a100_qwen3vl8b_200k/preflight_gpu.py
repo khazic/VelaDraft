@@ -494,18 +494,26 @@ def methods_section(contract: dict, model, args, batch: dict) -> None:
         torch.cuda.reset_peak_memory_stats(0)
         module, _ = drafter_module(method, contract, model, args)
         # Gradient coverage at steps where every head is live: Domino's correction
-        # head starts after its curriculum (lambda_base < 1), DFly spans both stages.
+        # head starts after its curriculum (lambda_base < 1), DFly spans both
+        # stages. Zero-initialized residual branches (DFly's hidden correction
+        # down_proj) pass no gradient to their inputs on the first update, so the
+        # audit runs on the second backward, after one optimizer step.
         probe_steps = {"domino": [matrix.TOTAL_UPDATES // 10], "dfly": [0, matrix.DFLY_BOUNDARY]}.get(method, [0])
+        optimizer = torch.optim.AdamW([p for p in module.draft_model.parameters() if p.requires_grad], lr=1e-4)
         groups: dict[str, float] = {}
         for probe in probe_steps:
-            module.zero_grad(set_to_none=True)
-            torch.manual_seed(0)
-            metrics = forward(module, batch, step=probe)
-            metrics.loss.backward()
+            for update in range(2):
+                module.zero_grad(set_to_none=True)
+                torch.manual_seed(0)
+                metrics = forward(module, batch, step=probe + update)
+                metrics.loss.backward()
+                if update == 0:
+                    optimizer.step()
             got = grads(module)
             for name, grad in got.items():
                 key = ".".join(name.split(".")[:2])
                 groups[key] = groups.get(key, 0.0) + float(grad.norm())
+        del optimizer
         trainable = {".".join(n.split(".")[:2]) for n, p in module.draft_model.named_parameters() if p.requires_grad}
         silent = sorted(key for key in trainable if groups.get(key, 0.0) == 0.0)
         extra = {key: float(value) for key, value in (getattr(metrics, "extra_metrics", None) or {}).items()
