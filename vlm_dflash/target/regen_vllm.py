@@ -168,44 +168,51 @@ def _load_outputs(out_dir: Path) -> dict[str, dict]:
 
 
 def _verify_last_turn_render(processor, row: dict, media_dir: Path, full_ids: list[int], target_index: int,
-                             answer_text: str) -> None:
+                             answer_text: str) -> str:
     from .regen import _verify_full_render
 
     images = [Image.open(path).convert("RGB") for path in row_image_paths(row, media_dir)]
-    _verify_full_render(processor, row, images, full_ids, {target_index: answer_text})
+    return _verify_full_render(processor, row, images, full_ids, {target_index: answer_text})
 
 
-def _worker_render_check(item: tuple) -> tuple[str, str | None]:
-    """Full-render check of one regenerated last turn in a pool worker: ``(id, error or None)``."""
+def _worker_render_check(item: tuple) -> tuple[str, str | None, str | None]:
+    """Full-render check of one regenerated last turn in a pool worker: ``(id, error or None, match kind)``."""
     row_id, row, full_ids, target_index, answer_text = item
     try:
-        _verify_last_turn_render(
+        kind = _verify_last_turn_render(
             _WORKER["processor"], row, _WORKER["media_dir"], full_ids, target_index, answer_text
         )
     except RuntimeError as error:
-        return row_id, str(error)[:300]
-    return row_id, None
+        return row_id, str(error)[:300], None
+    return row_id, None, kind
 
 
-def _render_drift(cfg: dict, contract: dict, media_dir: Path, checks: list[tuple], workers: int) -> dict[str, str]:
-    """Rows whose prompt + sampled answer ids are not one template render (``id -> error``).
+def _render_drift(
+    cfg: dict, contract: dict, media_dir: Path, checks: list[tuple], workers: int
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Rows whose prompt + sampled answer text is not one template render (``id -> error``), plus match counts.
 
-    Sampling can emit a non-canonical tokenization of its own text, so re-rendering
-    the conversation tokenizes the answer differently. Such rows are dropped (and
-    replaced from the pool) rather than stored with ids no render reproduces.
+    Sampling can emit a non-canonical tokenization of its own text; such a row
+    re-renders to the same text with other ids and is kept (counted as
+    ``same_text``). Rows whose decoded text differs are dropped (and replaced
+    from the pool) rather than stored with ids no render reproduces.
     """
     from concurrent.futures import ProcessPoolExecutor
 
+    counts: Counter = Counter()
     if not checks:
-        return {}
+        return {}, dict(counts)
     drift = {}
     with ProcessPoolExecutor(
         max_workers=workers, initializer=_worker_init, initargs=(cfg, contract, str(media_dir))
     ) as pool:
-        for row_id, error in pool.map(_worker_render_check, checks, chunksize=64):
+        for row_id, error, kind in pool.map(_worker_render_check, checks, chunksize=64):
             if error is not None:
                 drift[row_id] = error
-    return drift
+                counts["drift"] += 1
+            else:
+                counts[kind] += 1
+    return drift, dict(counts)
 
 
 def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: int | None = None) -> dict:
@@ -301,7 +308,11 @@ def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: i
             }
         kept.append(record)
 
-    drift = _render_drift(cfg, contract, media_dir, render_checks, int(regen_cfg.get("finalize_workers", 32)))
+    drift, render_matches = _render_drift(
+        cfg, contract, media_dir, render_checks, int(regen_cfg.get("finalize_workers", 32))
+    )
+    if render_matches.get("same_text"):
+        log(f"regen_vllm: {render_matches['same_text']} multi-turn row(s) kept as tokenizer non-roundtrip splits")
     if drift:
         kept = [record for record in kept if record["id"] not in drift]
         skipped.extend({"id": row_id, "reason": "render_drift", "error": error} for row_id, error in drift.items())
@@ -333,6 +344,8 @@ def finalize_vllm_regen(cfg: dict, run_dir: str | Path, contract: dict, limit: i
         "num_surplus": len(surplus),
         "num_skipped": len(skipped),
         "skip_reasons": dict(Counter(entry["reason"] for entry in skipped)),
+        # Multi-turn full-render check: exact token match, kept non-roundtrip split, dropped drift.
+        "render_check": render_matches,
         "max_new_tokens": max_new_tokens,
         "min_response_tokens": min_response_tokens,
         "max_prompt_tokens": int(regen_cfg.get("max_prompt_tokens", 2048)),

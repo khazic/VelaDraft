@@ -1029,3 +1029,18 @@ def test_same_text_render_protects_multimodal_tokens():
     # An image token after the first differing position would shift multimodal positions.
     assert not same_text_render(processor, [1, _TW, 500, 3], [1, ord("t"), ord("w"), 500, 3], protected_ids={500})
     assert same_text_render(processor, [500, 1, _TW, 3], [500, 1, ord("t"), ord("w"), 3], protected_ids={500})
+
+
+def test_vllm_render_check_reports_exact_same_text_and_drift(tmp_path, monkeypatch):
+    from vlm_dflash.target import regen_vllm
+
+    processor = _NonRoundtripProcessor()
+    row = _stored_last_turn_row(tmp_path, processor, "two")
+    prompt_ids = row["regen"]["turns"][-1]["prompt_ids"]
+    monkeypatch.setattr(regen_vllm, "_WORKER", {"processor": processor, "media_dir": tmp_path})
+    canonical = prompt_ids + [ord("t"), ord("w"), ord("o"), _END]
+    assert regen_vllm._worker_render_check(("a", row, canonical, 3, "two")) == ("a", None, "exact")
+    split = prompt_ids + [_TW, ord("o"), _END]
+    assert regen_vllm._worker_render_check(("b", row, split, 3, "two")) == ("b", None, "same_text")
+    row_id, error, kind = regen_vllm._worker_render_check(("c", row, prompt_ids + [_TW, ord("x"), _END], 3, "two"))
+    assert row_id == "c" and kind is None and "full-render drift" in error

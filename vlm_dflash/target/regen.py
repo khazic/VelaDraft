@@ -170,14 +170,15 @@ def _assistant_turn_indices(conversations: list[dict], sample_id) -> list[int]:
     return indices
 
 
-def _verify_full_render(processor, row: dict, images: list, full_ids: list[int], overrides: dict[int, str]) -> None:
+def _verify_full_render(processor, row: dict, images: list, full_ids: list[int], overrides: dict[int, str]) -> str:
     """Assert ``full_ids`` is one full-conversation chat-template render.
 
     A token prefix mismatch whose decoded text is identical is a tokenizer
     non-roundtrip split of a generated answer (see ``same_text_render``) and is
     accepted; any other mismatch is chat-template drift and fails loud.
     Non-empty trailing text after ``full_ids`` is refused so a stored sequence
-    can never silently drop part of the conversation.
+    can never silently drop part of the conversation. Returns ``"exact"`` or
+    ``"same_text"`` (the accepted non-roundtrip case).
     """
     full_messages, full_image_indices = messages_from_row(row, assistant_overrides=overrides)
     full_text = render_conversation(processor, full_messages, add_generation_prompt=False)
@@ -189,7 +190,7 @@ def _verify_full_render(processor, row: dict, images: list, full_ids: list[int],
         if same_text_render(
             processor.tokenizer, full_ids, rendered, protected_ids=multimodal_token_ids(processor, full_inputs)
         ):
-            return
+            return "same_text"
         raise RuntimeError(
             f"Multi-turn full-render drift for sample {row.get('id')}: the incremental token ids do not "
             "match one apply_chat_template render of the whole conversation; refusing to store them."
@@ -199,6 +200,7 @@ def _verify_full_render(processor, row: dict, images: list, full_ids: list[int],
         raise RuntimeError(
             f"Multi-turn render of sample {row.get('id')} produced unexpected trailing tokens {tail!r}."
         )
+    return "exact"
 
 
 def _regen_multi_turn_row(
