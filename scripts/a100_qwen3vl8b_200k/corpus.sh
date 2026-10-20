@@ -10,7 +10,8 @@
 # 2. link + verify its media from VELA_MEDIA_SOURCE (a prepared-data image dir);
 # 3. regen.sh over GPUS (vLLM, one shard per GPU; resumable);
 # 4. freeze: checksums, read-only files, the contract-layout manifests and the
-#    regen report. Ends with CORPUS_FROZEN.
+#    regen report; 5. pack the images into tar shards on the shared disk for
+#    other nodes. Ends with CORPUS_FROZEN.
 set -Eeuo pipefail
 trap 'echo "CORPUS_ABORT line=$LINENO cmd=$BASH_COMMAND exit=$?" >&2' ERR
 : "${VELA_TASK:?}" "${VELA_SRC_POOL:?}" "${VELA_MEDIA_SOURCE:?}" "${VELA_SHM:?}" "${TP:?}" "${GPUS:?}" "${OVERSAMPLE:?}"
@@ -37,4 +38,8 @@ RUN=$CORPUS POOL=$POOL/pool.jsonl GPUS=$GPUS bash scripts/a100_qwen3vl8b_200k/re
 "$TP" scripts/a100_qwen3vl8b_200k/freeze_corpus.py --task "$VELA_TASK" --pool "$POOL" --corpus "$CORPUS" \
   | tee -a "$VELA_TASK/logs/corpus.log"
 "$TP" scripts/a100_qwen3vl8b_200k/regen_report.py --run "$CORPUS" --meta "$POOL/pool_meta.jsonl" > /dev/null
+# The corpus images live on this node's tmpfs; tar shards on the shared disk let any
+# other node restore them (media_tar.sh restore) before it trains a row.
+bash scripts/a100_qwen3vl8b_200k/media_tar.sh pack "$VELA_SHM/corpus_images" "$VELA_TASK/corpus_media_tar" \
+  | tee -a "$VELA_TASK/logs/corpus.log"
 say "CORPUS_FROZEN"
