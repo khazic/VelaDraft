@@ -12,6 +12,7 @@ stripped), which is exactly the v1 layout for single-image rows.
 
 from __future__ import annotations
 
+import logging
 
 _HUMAN_ROLES = ("human", "user")
 _GPT_ROLES = ("gpt", "assistant", "model")
@@ -21,11 +22,35 @@ _GPT_ROLES = ("gpt", "assistant", "model")
 CHAT_TEMPLATE_KWARGS_ATTR = "vlm_dflash_chat_template_kwargs"
 
 
+class _UnreadTemplateKwargsFilter(logging.Filter):
+    """Drop transformers' per-call warning for contract kwargs the template does not read.
+
+    ``apply_chat_template`` routes keyword arguments its Jinja template never
+    references to the processor call and warns on every render. The renderer
+    always passes ``tokenize=False``, so those kwargs (e.g. ``enable_thinking``
+    for a template without a thinking switch) are ignored; only that warning is
+    dropped, and only while a contract render runs.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "have to be in `processor_kwargs`" not in record.getMessage()
+
+
+_UNREAD_KWARGS_FILTER = _UnreadTemplateKwargsFilter()
+
+
 def _apply_chat_template(processor, messages: list[dict], *, add_generation_prompt: bool) -> str:
     kwargs = getattr(processor, CHAT_TEMPLATE_KWARGS_ATTR, {})
-    return processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kwargs
-    )
+    if not kwargs:
+        return processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+    logger = logging.getLogger("transformers.processing_utils")
+    logger.addFilter(_UNREAD_KWARGS_FILTER)
+    try:
+        return processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kwargs
+        )
+    finally:
+        logger.removeFilter(_UNREAD_KWARGS_FILTER)
 
 
 def strip_image_placeholder(question: str) -> str:

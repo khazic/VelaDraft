@@ -108,3 +108,30 @@ def test_contract_kwargs_must_be_a_mapping_without_renderer_owned_names():
         _checked_template_kwargs("enable_thinking")
     with pytest.raises(ContractError, match=r"cannot set \['add_generation_prompt', 'tokenize'\]"):
         _checked_template_kwargs({"tokenize": True, "add_generation_prompt": True, "enable_thinking": False})
+
+
+class _WarningProcessor(_RecordingProcessor):
+    """Logs transformers' unread-kwargs warning like apply_chat_template does, plus an unrelated one."""
+
+    def apply_chat_template(self, messages, **kwargs):
+        import logging
+
+        logger = logging.getLogger("transformers.processing_utils")
+        logger.warning("Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict, not in `**kwargs`")
+        logger.warning("another warning")
+        return super().apply_chat_template(messages, **kwargs)
+
+
+def test_render_drops_only_the_unread_template_kwargs_warning(caplog):
+    import logging
+
+    processor = _WarningProcessor()
+    setattr(processor, CHAT_TEMPLATE_KWARGS_ATTR, {"enable_thinking": False})
+    with caplog.at_level(logging.WARNING, logger="transformers.processing_utils"):
+        render_prompt(processor, "What is shown?")
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == ["another warning"]
+    # The filter is removed after the render: outside it the warning is not hidden.
+    with caplog.at_level(logging.WARNING, logger="transformers.processing_utils"):
+        logging.getLogger("transformers.processing_utils").warning("have to be in `processor_kwargs` elsewhere")
+    assert any("elsewhere" in record.getMessage() for record in caplog.records)
