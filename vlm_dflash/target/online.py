@@ -623,6 +623,7 @@ class OnlineFeatureSource:
         """
         self._sync_target()
         started = time.perf_counter()
+        timings: dict = {}
         records = finalize_prepared_records(
             self.model,
             prepared_list,
@@ -632,10 +633,16 @@ class OnlineFeatureSource:
             dtype=self.dtype,
             store_final_hidden=self.store_final_hidden,
             tokenizer=getattr(self.processor, "tokenizer", None),
+            timings=timings,
         )
         self._sync_target()
         elapsed = time.perf_counter() - started
         entry = self._stats_entry()
+        # forward_seconds = model_forward_seconds (target call) + feature_extract_seconds
+        # (layer slicing, positions, device-to-host copy) + record bookkeeping.
+        for key in ("model_forward_seconds", "feature_extract_seconds", "d2h_bytes"):
+            if key in timings:
+                entry[key] = entry.get(key, 0) + timings[key]
         entry["target_forwards"] += 1
         entry["target_samples"] = int(entry.get("target_samples", 0)) + len(prepared_list)
         entry["forward_seconds"] = float(entry.get("forward_seconds", 0.0)) + elapsed

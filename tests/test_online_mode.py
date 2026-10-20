@@ -179,7 +179,7 @@ def _install_stub_extraction(monkeypatch, calls: list, *, store_final_hidden: bo
         return {"row": row, "seq_length": seq_length}
 
     def fake_finalize(model, prepared_list, *, layer_ids, image_token_id, merge_size, dtype,
-                      store_final_hidden, tokenizer=None):
+                      store_final_hidden, tokenizer=None, timings=None):
         return [
             records_for(
                 model,
@@ -715,7 +715,7 @@ def _install_batched_stub(monkeypatch, calls: list, *, context_hidden: int = 16)
         return {"row": row}
 
     def fake_finalize(model, prepared_list, *, layer_ids, image_token_id, merge_size, dtype,
-                      store_final_hidden, tokenizer=None):
+                      store_final_hidden, tokenizer=None, timings=None):
         calls.append(("forward", [item["row"].get("id") for item in prepared_list]))
         return [_record_for_row(item["row"], context_hidden=context_hidden) for item in prepared_list]
 
@@ -828,7 +828,7 @@ def test_online_extraction_boundary_fake_clock(monkeypatch, tmp_path):
         return {"row": row, "seq_length": seq_length}
 
     def fake_finalize(model, prepared_list, *, layer_ids, image_token_id, merge_size, dtype,
-                      store_final_hidden, tokenizer=None):
+                      store_final_hidden, tokenizer=None, timings=None):
         clock["now"] += 2.0  # forward + finalisation work
         return [_record_for_row(item["row"]) for item in prepared_list]
 
@@ -1779,7 +1779,7 @@ def test_online_capture_rejects_prompt_drift_and_token_count_mismatch(monkeypatc
     from vlm_dflash.target import sample_capture as sample_capture_module
 
     def fake_forward(model_, inputs, full_ids, layer_ids, image_token_id, dtype, merge_size=2,
-                     store_final_hidden=False, tokenizer=None):
+                     store_final_hidden=False, tokenizer=None, timings=None):
         length = int(full_ids.numel())
         return {
             "input_ids": full_ids.to(torch.int32),
@@ -2186,6 +2186,36 @@ def test_train_dflash_snapshot_cadence(monkeypatch, tmp_path, snapshot_every, ex
     assert (train_dir / "ckpt_last.pt").exists() and (train_dir / "ckpt_final.pt").exists()
     snapshots = sorted(int(path.stem.removeprefix("ckpt_step")) for path in train_dir.glob("ckpt_step*.pt"))
     assert snapshots == expected
+
+
+def test_train_dflash_stage_timing_rows(monkeypatch, tmp_path):
+    # Four rows, two per update: the two updates see different samples.
+    _model, _processor, contract, run_dir, cfg, _source = _tiny_train_setup(monkeypatch, tmp_path, rows=4)
+    _patch_tiny_draft_build(monkeypatch)
+    _patch_drafter_visual_check(monkeypatch)
+    cfg["train"].update(stage_timing=True, grad_accumulation_steps=2)
+    train_dflash(cfg, run_dir, contract, steps=2, feature_mode="online")
+    rows = [json.loads(line) for line in (run_dir / "train" / "train_log.jsonl").read_text().splitlines()]
+    assert [row["step"] for row in rows] == [1, 2]
+    for row in rows:
+        for stage in ("data", "h2d", "drafter_forward", "objective", "backward", "optimizer"):
+            assert row[f"time_{stage}"] >= 0.0, stage
+        # The online source's own counters, as per-step deltas.
+        assert row["time_target_forward"] > 0.0 and row["time_target_prepare"] > 0.0
+        assert row["time_feature_extract"] >= 0.0 and row["d2h_bytes"] > 0
+        assert row["h2d_bytes"] > 0
+        assert row["time_step"] >= row["time_backward"]
+        assert len(row["batch_digest"]) == 16
+    assert rows[0]["batch_digest"] != rows[1]["batch_digest"]
+    # The draft hooks are removed when the loop ends.
+    timed_keys = {key for key in rows[0] if key.startswith("time_")}
+    assert "time_drafter_forward" in timed_keys
+
+
+def test_train_dflash_logs_no_timing_by_default(monkeypatch, tmp_path):
+    _cfg, _contract, run_dir, _summary = _tiny_online_train_run(monkeypatch, tmp_path)
+    rows = [json.loads(line) for line in (run_dir / "train" / "train_log.jsonl").read_text().splitlines()]
+    assert not any(key.startswith("time_") for row in rows for key in row)
 
 
 def test_train_dflash_rejects_bad_snapshot_cadence(monkeypatch, tmp_path):

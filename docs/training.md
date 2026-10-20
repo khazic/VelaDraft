@@ -92,6 +92,15 @@ Written under `<run_dir>/train/`:
 The overfit-sanity gate writes `<run_dir>/train/overfit_sanity.json`; it is
 recorded, not enforced - a `"passed": false` there is a signal, not a crash.
 
+`train.stage_timing: true` adds per-step wall times to every `train_log.jsonl`
+row, synchronized on the train device: `time_data` (loader fetch; for an online
+source also split into `time_target_prepare`, `time_target_forward` and
+`time_feature_extract` with `d2h_bytes`), `time_h2d` (with `h2d_bytes`),
+`time_drafter_forward`, `time_objective`, `time_backward`, `time_optimizer`,
+plus `train_peak_gb`, `target_peak_gb` (split devices), `cpu_rss_gb` and
+`batch_digest` (sha256 prefix of the step's token ids, for comparing two runs'
+sample streams update by update).
+
 ## Resume
 
 ```bash

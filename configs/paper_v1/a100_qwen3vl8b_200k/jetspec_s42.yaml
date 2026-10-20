@@ -69,5 +69,6 @@ train:
   save_every_steps: 1250
   milestone_snapshots: true
   snapshot_every_steps: 12500
+  stage_timing: true
   overfit_sanity: {enabled: true, num_samples: 4, steps: 200, ce_drop: 0.6, slot0_acc: 0.9}
 eval: {verification: sequential, sequential_target_verification: true, verify_sdpa_backend: parity, max_new_tokens: 128}

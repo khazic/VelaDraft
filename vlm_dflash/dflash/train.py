@@ -13,8 +13,10 @@ visual-dependence check.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -127,6 +129,90 @@ def _reconcile_train_log(log_path: Path, committed_step: int) -> None:
             f"train: reconciled train log to committed step {committed_step} "
             f"({len(uncommitted)} uncommitted rows -> {recovery_path.name})"
         )
+
+
+#: Online-source phase counters a stage-timed step reports as deltas.
+_SOURCE_TIMING_KEYS = {
+    "target_prepare_seconds": "prepare_seconds",
+    "target_forward_seconds": "model_forward_seconds",
+    "feature_extract_seconds": "feature_extract_seconds",
+    "d2h_bytes": "d2h_bytes",
+}
+
+
+class _StageTimer:
+    """Per-optimizer-step wall time by stage (``train.stage_timing``), synchronized on the train device.
+
+    Stages: ``data`` (loader fetch; for an online source this is the target
+    render + forward + device-to-host copy + collate, broken down by the
+    source's own counters), ``h2d`` (batch to the train device, with bytes),
+    ``drafter_forward`` (the draft backbone, via module hooks), ``objective``
+    (the rest of the module forward: anchors, masks, heads, loss), ``backward``
+    and ``optimizer`` (master sync, clip, step, scheduler). Off by default:
+    every boundary costs one device synchronize.
+    """
+
+    def __init__(self, module, device, dataset) -> None:
+        self.device = device
+        self.source = getattr(dataset, "source", None)
+        self.totals: dict[str, float] = {}
+        self.h2d_bytes = 0
+        # Content digest of the step's micro-batches (token ids), so two runs can
+        # be compared update by update for the exact same sample stream.
+        self.batch_digest = hashlib.sha256()
+        self._last = time.perf_counter()
+        self._source_mark = self._source_counters()
+        self._hooks = [
+            module.draft_model.register_forward_pre_hook(lambda *_: self.mark("objective")),
+            module.draft_model.register_forward_hook(lambda *_: self.mark("drafter_forward")),
+        ]
+
+    def _sync(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _source_counters(self) -> dict:
+        stats = getattr(self.source, "stats", None) or {}
+        entry = stats.get(getattr(self.source, "phase", "train"), {})
+        return {key: float(entry.get(name, 0.0)) for key, name in _SOURCE_TIMING_KEYS.items()}
+
+    def mark(self, stage: str) -> None:
+        self._sync()
+        now = time.perf_counter()
+        self.totals[stage] = self.totals.get(stage, 0.0) + now - self._last
+        self._last = now
+
+    def step_row(self) -> dict:
+        """Timing of the step that just ended; resets the per-step accumulators."""
+        counters = self._source_counters()
+        row = {f"time_{stage}": round(value, 4) for stage, value in self.totals.items()}
+        row["time_step"] = round(sum(self.totals.values()), 4)
+        row["h2d_bytes"] = int(self.h2d_bytes)
+        row["batch_digest"] = self.batch_digest.hexdigest()[:16]
+        for key in _SOURCE_TIMING_KEYS:
+            delta = counters[key] - self._source_mark[key]
+            row[key if key == "d2h_bytes" else f"time_{key.removesuffix('_seconds')}"] = (
+                int(delta) if key == "d2h_bytes" else round(delta, 4)
+            )
+        if self.device.type == "cuda":
+            row["train_peak_gb"] = round(torch.cuda.max_memory_allocated(self.device) / 2**30, 2)
+            target_devices = [d for d in getattr(self.source, "target_devices", []) or [] if d != self.device]
+            if target_devices:
+                row["target_peak_gb"] = round(
+                    max(torch.cuda.max_memory_allocated(d) for d in target_devices) / 2**30, 2
+                )
+        try:
+            with open("/proc/self/statm") as handle:
+                row["cpu_rss_gb"] = round(int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**30, 2)
+        except (OSError, ValueError, IndexError):
+            pass
+        self.totals, self.h2d_bytes, self._source_mark = {}, 0, counters
+        self.batch_digest = hashlib.sha256()
+        return row
+
+    def close(self) -> None:
+        for hook in self._hooks:
+            hook.remove()
 
 
 def _unwrap_subset(dataset):
@@ -559,6 +645,7 @@ def run_training_loop(
 
     skippable_errors = tuple(getattr(module, "skippable_errors", ()) or ()) or (NoValidAnchorsError,)
     optimizer.zero_grad(set_to_none=True)
+    timer = _StageTimer(module, device, base_dataset) if bool(train_cfg.get("stage_timing", False)) else None
     iterator = iter(loader)
     # Fast-forward a resumed run to the same micro-batch position the original
     # uninterrupted run had reached (the shuffle order is reproducible from the
@@ -592,10 +679,19 @@ def run_training_loop(
         # accumulation window is progress, not a stall.
         valid_micro = 0
         epoch_started = time.time()
+        if timer is not None:
+            # Loader setup at an epoch start (the first one includes a resume fast-forward).
+            timer.mark("loop_setup")
         for batch in iterator:
+            if timer is not None:
+                timer.mark("data")
+                timer.batch_digest.update(batch["input_ids"].numpy().tobytes())
             batch_lengths = batch.get("lengths")
             batch = {key: value for key, value in batch.items() if key != "lengths"}
             batch = {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
+            if timer is not None:
+                timer.h2d_bytes += sum(v.numel() * v.element_size() for v in batch.values() if torch.is_tensor(v))
+                timer.mark("h2d")
             # Algorithm progress hook: curricula (e.g. Domino's lambda_base)
             # need the optimizer-step counter before the forward runs. Modules
             # that do not define it (DFlash, DSpark) are unaffected.
@@ -623,6 +719,8 @@ def run_training_loop(
             except skippable_errors:
                 skipped_batches += 1
                 continue
+            if timer is not None:
+                timer.mark("objective")
             valid_micro += 1
             loss = metrics.loss
             if not torch.isfinite(loss):
@@ -634,6 +732,8 @@ def run_training_loop(
                 # the reference microbatch-mean objective) and the same
                 # optimizer-step cadence / update order as the shipped path.
                 (loss / accumulation).backward()
+            if timer is not None:
+                timer.mark("backward")
             micro_step += 1
             if micro_step % accumulation == 0:
                 if step == coverage_audit_step:
@@ -683,6 +783,9 @@ def run_training_loop(
                     "lr": float(scheduler.get_last_lr()[0]),
                     "grad_norm": float(grad_norm),
                 }
+                if timer is not None:
+                    timer.mark("optimizer")
+                    row.update(timer.step_row())
                 if getattr(metrics, "extra_metrics", None):
                     row.update({key: float(value) for key, value in metrics.extra_metrics.items()})
                 if metrics.pos_correct is not None and metrics.pos_count is not None:
@@ -762,6 +865,8 @@ def run_training_loop(
             )
         )
 
+    if timer is not None:
+        timer.close()
     losses = [row["loss"] for row in history]
     window = max(1, len(losses) // 10)
     summary = {

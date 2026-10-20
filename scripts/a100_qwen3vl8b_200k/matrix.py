@@ -136,6 +136,8 @@ BASE: dict = {
         "save_every_steps": 1250,
         "milestone_snapshots": True,
         "snapshot_every_steps": SNAPSHOT_EVERY,
+        # Per-step stage wall times, peaks and transfer bytes in train_log.jsonl.
+        "stage_timing": True,
         "overfit_sanity": {"enabled": True, "num_samples": 4, "steps": 200, "ce_drop": 0.6, "slot0_acc": 0.9},
     },
     "eval": {
@@ -259,7 +261,7 @@ KNOWN_KEYS: dict[str, set[str]] = {
         "device", "feature_mode", "online_batch_size", "online_feature_cache_gb", "num_workers", "micro_batch_size",
         "grad_accumulation_steps", "num_epochs", "lr", "betas", "weight_decay", "max_grad_norm", "warmup_ratio",
         "min_lr_ratio", "seed", "log_every_steps", "draft_dtype", "save_every_steps", "milestone_snapshots",
-        "snapshot_every_steps", "overfit_sanity",
+        "snapshot_every_steps", "stage_timing", "overfit_sanity",
     },
     "train.overfit_sanity": {"enabled", "num_samples", "steps", "ce_drop", "slot0_acc"},
     "eval": {

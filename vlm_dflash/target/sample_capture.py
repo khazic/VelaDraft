@@ -17,6 +17,7 @@ post-final-norm tensor the target ``lm_head`` consumes).
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import torch
@@ -120,6 +121,7 @@ def forward_and_capture_batch(
     merge_size: int | None = None,
     store_final_hidden: bool = False,
     tokenizer=None,
+    timings: dict | None = None,
 ) -> list[dict]:
     """Batched capture forward: one padded model call for several prepared rows.
 
@@ -128,6 +130,10 @@ def forward_and_capture_batch(
     is sliced back to the row's own length before a record is built, so pad
     positions never reach a record. Mathematically each row runs the same
     teacher-forced forward as :func:`forward_and_capture` does alone.
+
+    ``timings`` (optional) receives ``model_forward_seconds`` (the target call)
+    and ``feature_extract_seconds`` (layer slicing, positions, device-to-host
+    copy), synchronized on the target device, plus ``d2h_bytes``.
     """
     device = next(model.parameters()).device
     lengths = [int(item["full_ids"].numel()) for item in prepared_list]
@@ -176,7 +182,13 @@ def forward_and_capture_batch(
                 extended_mm[row_index] = extended
                 stacked[row_index, : lengths[row_index]] = extended[0]
             forward_kwargs["mm_token_type_ids"] = stacked
+    if timings is not None:
+        _sync(device)
+        started = time.perf_counter()
     output = model(**forward_kwargs)
+    if timings is not None:
+        _sync(device)
+        forwarded = time.perf_counter()
     hidden_states = output.hidden_states
     # A device-mapped target leaves each layer's output on its own GPU.
     fuse_device = hidden_states[layer_ids[0] + 1].device
@@ -228,7 +240,24 @@ def forward_and_capture_batch(
         if final_hidden is not None:
             record["final_hidden"] = final_hidden
         records.append(record)
+    if timings is not None:
+        _sync(device)
+        timings["model_forward_seconds"] = timings.get("model_forward_seconds", 0.0) + forwarded - started
+        timings["feature_extract_seconds"] = (
+            timings.get("feature_extract_seconds", 0.0) + time.perf_counter() - forwarded
+        )
+        timings["d2h_bytes"] = timings.get("d2h_bytes", 0) + sum(
+            value.numel() * value.element_size()
+            for record in records
+            for value in (record["hidden"], record["position3"], record.get("final_hidden"))
+            if value is not None
+        )
     return records
+
+
+def _sync(device) -> None:
+    if getattr(device, "type", None) == "cuda":
+        torch.cuda.synchronize(device)
 
 
 @torch.inference_mode()
@@ -243,6 +272,7 @@ def forward_and_capture(
     store_final_hidden: bool = False,
     allow_multi_span: bool = False,
     tokenizer=None,
+    timings: dict | None = None,
 ) -> dict:
     """One capture forward; returns the sample record consumed by training.
 
@@ -270,6 +300,7 @@ def forward_and_capture(
         merge_size=merge_size,
         store_final_hidden=store_final_hidden,
         tokenizer=tokenizer,
+        timings=timings,
     )[0]
 
 
@@ -539,6 +570,7 @@ def finalize_prepared_records(
     dtype: torch.dtype,
     store_final_hidden: bool,
     tokenizer=None,
+    timings: dict | None = None,
 ) -> list[dict]:
     """Run the (batched) capture forward for prepared rows and attach metadata."""
     if len(prepared_list) == 1:
@@ -557,6 +589,7 @@ def finalize_prepared_records(
                 merge_size=merge_size,
                 store_final_hidden=store_final_hidden,
                 tokenizer=tokenizer,
+                timings=timings,
                 **extra,
             )
         ]
@@ -570,6 +603,7 @@ def finalize_prepared_records(
             merge_size=merge_size,
             store_final_hidden=store_final_hidden,
             tokenizer=tokenizer,
+            timings=timings,
         )
     for prepared, record in zip(prepared_list, records):
         if prepared.get("check_image_token_count") and (
