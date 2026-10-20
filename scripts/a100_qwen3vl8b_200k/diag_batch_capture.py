@@ -141,6 +141,20 @@ def main() -> None:
         deep_b = [d.float() for d in batch_vis.deepstack_features]
         deep_r = [torch.cat([v.deepstack_features[k] for v in vis_rows]).float() for k in range(len(deep_b))]
         report["deepstack_rel_l2"] = [round(float((b - r).norm() / r.norm()), 6) for b, r in zip(deep_b, deep_r)]
+    # 4. Throughput: the same 16 rows (the four real rows, four times) at online batch 1 / 2 / 4.
+    import time
+
+    stream = rows * 4
+    timing = {}
+    for size in (1, 2, 4):
+        cap(stream[:size])  # warm-up at this shape
+        torch.cuda.synchronize(dev)
+        started = time.perf_counter()
+        for start in range(0, len(stream), size):
+            cap(stream[start:start + size])
+        torch.cuda.synchronize(dev)
+        timing[f"batch{size}"] = round((time.perf_counter() - started) / len(stream), 4)
+    report["capture_seconds_per_row"] = timing
     Path(args.out).write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
     print("DIAG_DONE")
