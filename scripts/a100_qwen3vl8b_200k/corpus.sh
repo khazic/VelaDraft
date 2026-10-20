@@ -5,7 +5,8 @@
 #     bash scripts/a100_qwen3vl8b_200k/corpus.sh
 #
 # 1. derive the formal pool from the frozen source pool (VELA_SRC_POOL) with the
-#    per-group oversample measured by the regen pilot; dev/test are unchanged;
+#    per-group oversample measured by the regen pilot, minus VELA_EXCLUDE_IDS
+#    (train rows sharing an image with an evaluation set); dev/test are unchanged;
 # 2. link + verify its media from VELA_MEDIA_SOURCE (a prepared-data image dir);
 # 3. regen.sh over GPUS (vLLM, one shard per GPU; resumable);
 # 4. freeze: checksums, read-only files, the contract-layout manifests and the
@@ -21,9 +22,13 @@ QUOTAS=general=70000,ocr=60000,chart=30000,reasoning=40000
 say() { echo "[$(date '+%F %T')] $*" | tee -a "$VELA_TASK/logs/corpus.log"; }
 mkdir -p "$VELA_TASK/logs"
 say "corpus start commit=$(git rev-parse --short HEAD) oversample=$OVERSAMPLE gpus=$GPUS"
+# Optional VELA_EXCLUDE_IDS: train rows whose image is an evaluation image (media_overlap.py).
+EXCLUDE=()
+[ -n "${VELA_EXCLUDE_IDS:-}" ] && EXCLUDE=(--exclude-ids "$VELA_EXCLUDE_IDS")
 if [ ! -s "$POOL/checksums.txt" ]; then
   "$TP" scripts/a100_qwen3vl8b_200k/derive_pool.py --src "$VELA_SRC_POOL" --out "$POOL" --quotas "$QUOTAS" \
-    --oversample "$OVERSAMPLE" --media-root "${VELA_SRC_MEDIA_ROOT:?}=$VELA_SHM/pool_media" | tee -a "$VELA_TASK/logs/corpus.log"
+    --oversample "$OVERSAMPLE" --media-root "${VELA_SRC_MEDIA_ROOT:?}=$VELA_SHM/pool_media" "${EXCLUDE[@]}" \
+    | tee -a "$VELA_TASK/logs/corpus.log"
 fi
 ( cd "$POOL" && sha256sum -c checksums.txt --quiet ) && say "pool checksums ok"
 "$TP" scripts/a100_qwen3vl8b_200k/link_media.py --pool "$POOL/pool.jsonl" --from "$VELA_MEDIA_SOURCE" --workers 32 \

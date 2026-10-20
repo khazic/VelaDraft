@@ -79,6 +79,19 @@ def test_derive_takes_rank_prefixes_and_keeps_dev_test(tmp_path):
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest
 
 
+def test_derive_excluded_rows_do_not_count(tmp_path):
+    src = _source_pool(tmp_path, "/old/media")
+    stats = derive_pool.derive(src, tmp_path / "out", {"general": 2, "ocr": 1}, {"general": 1.0, "ocr": 1.0}, None,
+                               None, {"general-0", "ocr-1"})
+    # general-0 is skipped, so general takes ranks 1 and 2; ocr-1 leaves the reserve.
+    assert _ids(tmp_path / "out" / "pool.jsonl")[:3] == ["general-1", "general-2", "ocr-0"]
+    assert "ocr-1" not in _ids(tmp_path / "out" / "reserve.jsonl")
+    assert stats["num_excluded"] == 2
+    with pytest.raises(SystemExit, match="held-out splits are frozen"):
+        derive_pool.derive(src, tmp_path / "out2", {"general": 1, "ocr": 1}, {"general": 1.0, "ocr": 1.0}, None,
+                           None, {"ocr-dev"})
+
+
 def test_derive_refuses_a_too_small_source(tmp_path):
     src = _source_pool(tmp_path, "/old/media")
     with pytest.raises(SystemExit, match="too small"):
