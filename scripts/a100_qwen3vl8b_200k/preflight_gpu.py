@@ -260,7 +260,7 @@ def teacher_section(args, model, processor, contract: dict, rows: list[dict], me
     # only by bf16 rounding (recorded) with the same greedy token.
     head = model.lm_head(hs[-1])
     final_vs_logits = max_abs(head, out.logits)
-    top1_agree = float((head.argmax(-1) == out.logits.argmax(-1)).float().mean())
+    top1_agree = bool((head.argmax(-1) == out.logits.argmax(-1)).all())
     partial_vs_logits = max_abs(model.lm_head(hs[-1][0, -4:]), out.logits[0, -4:])
     final_vs_record = max_abs(record["final_hidden"], hs[-1][0].cpu())
     report["teacher"] = {
@@ -277,7 +277,7 @@ def teacher_section(args, model, processor, contract: dict, rows: list[dict], me
         "store_final_hidden": True, "num_hidden_states": len(hs),
     }, indent=2))
     gate("hidden_layer_mapping", len(hs) == 37 and max(mapping.values()) == 0.0, mapping)
-    gate("final_hidden_semantics", final_vs_logits == 0.0 and top1_agree == 1.0 and final_vs_record == 0.0,
+    gate("final_hidden_semantics", final_vs_logits == 0.0 and top1_agree and final_vs_record == 0.0,
          {"lm_head(h[-1]) vs logits": final_vs_logits, "top1_agreement": top1_agree,
           "last4_recompute_max_abs (bf16 rounding)": partial_vs_logits, "record vs h[-1]": final_vs_record})
     gate("teacher_no_grad", not record["hidden"].requires_grad and record["hidden"].dtype == torch.bfloat16)
