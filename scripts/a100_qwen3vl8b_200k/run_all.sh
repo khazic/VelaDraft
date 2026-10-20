@@ -9,10 +9,12 @@
 # order DFlash -> DFly -> DFlash2 -> DSpark -> DFlare -> Domino -> JetSpec.
 # A slot is free when neither GPU's physical-UUID lock exists. Each method runs
 # as its own run_one.sh (own PID, run dir, logs); one method failing never stops
-# the others. Re-running the launcher resumes unfinished rows from their
-# durable checkpoints and skips rows that logged EXIT_CODE=0 (done) or
-# EXIT_CODE=1 (blocked; delete its stdout.log to retry). Exits when no row is
-# pending or running.
+# the others. Launchers on several nodes may share the queue: a row counts as
+# running while its shared-disk row lock has a fresh heartbeat. Re-running the
+# launcher resumes unfinished rows from their durable checkpoints and skips
+# rows whose log ends with EXIT_CODE=0 (done) or EXIT_CODE=1 (blocked; append
+# a line or delete its stdout.log to retry). Exits when no row is pending or
+# running.
 set -Eeuo pipefail
 trap 'echo "[$(date "+%F %T")] launcher abort line=$LINENO cmd=$BASH_COMMAND exit=$?"' ERR
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -35,17 +37,20 @@ for ((i = 0; i + 1 < ${#GPUS_OK[@]}; i += 2)); do SLOTS+=("${GPUS_OK[$i]},${GPUS
 say "launcher host=$(hostname -s) commit=$(git rev-parse --short HEAD) slots=${SLOTS[*]} queue=${QUEUE[*]}"
 
 state() {  # pending | running | done | blocked
-  local out=$VELA_TASK/logs/$1/stdout.log
+  # Running = the row lock on the shared disk exists with a heartbeat younger
+  # than 15 minutes (run_one refreshes it every minute on whichever node runs it).
+  local out=$VELA_TASK/logs/$1/stdout.log lock=$VELA_TASK/locks/row_$1
   if [ -f "$out" ] && grep -q "EXIT_CODE=0" "$out"; then echo done
-  elif [ -f "$out" ] && grep -q "EXIT_CODE=1" "$out"; then echo blocked
-  elif ps -eo args | grep -qE "^bash (\S*/)?run_one\.sh $1 "; then echo running
+  elif [ -f "$out" ] && tail -n 1 "$out" | grep -q "EXIT_CODE=1"; then echo blocked
+  elif [ -n "$(find "$lock/heartbeat" -mmin -15 2>/dev/null)" ]; then echo running
   else echo pending; fi
 }
 slot_free() {
   local g uuid
   for g in ${1//,/ }; do
     uuid=$(nvidia-smi -i "$g" --query-gpu=uuid --format=csv,noheader)
-    [ -e "$VELA_TASK/locks/$uuid" ] && return 1
+    # A GPU lock counts only while its heartbeat is fresh (run_one refreshes it every minute).
+    [ -n "$(find "$VELA_TASK/locks/$uuid/heartbeat" -mmin -15 2>/dev/null)" ] && return 1
   done
   return 0
 }

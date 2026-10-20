@@ -5,7 +5,8 @@
 #
 # Logical cuda:0 (first GPU) trains the drafter, cuda:1 holds the frozen target.
 # The pair is locked by physical GPU UUID under $VELA_TASK/locks/ for the whole
-# run. The trainer restarts with --resume from runs/<method>/train/ckpt_last.pt
+# run, and the row itself by $VELA_TASK/locks/row_<method> (shared disk, so a
+# launcher on any node sees it), refreshed by a heartbeat every minute. The trainer restarts with --resume from runs/<method>/train/ckpt_last.pt
 # after any failure (up to MAX_ATTEMPTS). Logs: $VELA_TASK/logs/<method>/
 # (stdout.log, stderr.log, metrics.jsonl -> train_log.jsonl, system.jsonl).
 # Ends with "EXIT_CODE=0 <method> done" or "EXIT_CODE=1 <method> ..." in stdout.log.
@@ -34,23 +35,42 @@ trap 'say "run_one abort line=$LINENO cmd=$BASH_COMMAND exit=$?"' ERR
 IFS=, read -ra PAIR <<< "$GPUS"
 [ "${#PAIR[@]}" -eq 2 ] || { say "EXIT_CODE=1 $M needs exactly two GPUs, got $GPUS"; exit 1; }
 
-# Physical-UUID locks (mkdir is atomic); released on exit.
+# Row lock + physical-UUID locks (mkdir is atomic); released on exit.
+# A lock whose heartbeat is older than 15 minutes belongs to a dead run (e.g. a lost
+# node) and is taken over; the rename makes the takeover race-free between launchers.
+# Lock conflicts exit 3 without an EXIT_CODE line, so they never mark the row blocked.
+ROW_LOCK=$VELA_TASK/locks/row_$M
+if [ -d "$ROW_LOCK" ] && [ -z "$(find "$ROW_LOCK/heartbeat" -mmin -15 2>/dev/null)" ]; then
+  mv "$ROW_LOCK" "$ROW_LOCK.stale.$$" 2>/dev/null && say "took over a stale row lock: $(cat "$ROW_LOCK.stale.$$/owner" 2>/dev/null)"
+fi
+if ! mkdir "$ROW_LOCK" 2>/dev/null; then
+  echo "[$(date '+%F %T')] $M already running: $(cat "$ROW_LOCK/owner" 2>/dev/null)"
+  exit 3
+fi
+echo "$M pid=$$ host=$(hostname -s) gpus=$GPUS since=$(date -Is)" > "$ROW_LOCK/owner"
+touch "$ROW_LOCK/heartbeat"
 UUIDS=()
 for g in "${PAIR[@]}"; do UUIDS+=("$(nvidia-smi -i "$g" --query-gpu=uuid --format=csv,noheader)"); done
 LOCKED=()
 release() {
+  rm -rf "$ROW_LOCK"
   for uuid in "${LOCKED[@]}"; do rm -rf "$VELA_TASK/locks/$uuid"; done
   for pid in ${COMPANIONS:-}; do kill "$pid" 2>/dev/null || true; done
   [ -n "${SAMPLER:-}" ] && kill "$SAMPLER" 2>/dev/null || true
 }
 trap release EXIT
 for uuid in "${UUIDS[@]}"; do
-  if mkdir "$VELA_TASK/locks/$uuid" 2>/dev/null; then
-    echo "$M pid=$$ host=$(hostname -s) gpus=$GPUS since=$(date -Is)" > "$VELA_TASK/locks/$uuid/owner"
+  lock=$VELA_TASK/locks/$uuid
+  if [ -d "$lock" ] && [ -z "$(find "$lock/heartbeat" -mmin -15 2>/dev/null)" ]; then
+    mv "$lock" "$lock.stale.$$" 2>/dev/null && say "took over a stale GPU lock: $(cat "$lock.stale.$$/owner" 2>/dev/null)"
+  fi
+  if mkdir "$lock" 2>/dev/null; then
+    echo "$M pid=$$ host=$(hostname -s) gpus=$GPUS since=$(date -Is)" > "$lock/owner"
+    touch "$lock/heartbeat"
     LOCKED+=("$uuid")
   else
-    say "EXIT_CODE=1 $M GPU $uuid is locked by: $(cat "$VELA_TASK/locks/$uuid/owner" 2>/dev/null)"
-    exit 1
+    echo "[$(date '+%F %T')] $M GPU $uuid is locked by: $(cat "$VELA_TASK/locks/$uuid/owner" 2>/dev/null)"
+    exit 3
   fi
 done
 
@@ -73,6 +93,8 @@ fi
       "$(nvidia-smi -i "$GPUS" --query-gpu=index,uuid,utilization.gpu,memory.used --format=csv,noheader,nounits \
          | awk -F', ' '{printf "%s{\"index\": %s, \"uuid\": \"%s\", \"util\": %s, \"mem_mib\": %s}", (NR>1?", ":""), $1, $2, $3, $4}')" \
       "$(free -g | awk '/^Mem/ {print $3}')" >> "$LOGS/system.jsonl"
+    touch "$ROW_LOCK/heartbeat"
+    for uuid in "${LOCKED[@]}"; do touch "$VELA_TASK/locks/$uuid/heartbeat"; done
     sleep 60
   done ) &
 SAMPLER=$!
