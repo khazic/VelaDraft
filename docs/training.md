@@ -87,6 +87,7 @@ Written under `<run_dir>/train/`:
 | `ckpt_init.pt` | random-init baseline (kept for the parity eval; never regenerated) |
 | `ckpt_last.pt` | resumable state (model + optimizer + scheduler + RNG), updated every `train.save_every_steps` (default: total_steps / 4) and at completion |
 | `ckpt_final.pt` | final trained weights |
+| `ckpt_step<N>.pt` | eval-format weights at a scheduled save, written when `train.milestone_snapshots` is true; `train.snapshot_every_steps` makes them sparser than the resumable saves (the recipe stage boundary always gets one) |
 
 The overfit-sanity gate writes `<run_dir>/train/overfit_sanity.json`; it is
 recorded, not enforced - a `"passed": false` there is a signal, not a crash.

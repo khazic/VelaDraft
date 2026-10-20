@@ -2172,6 +2172,31 @@ def _tiny_online_train_run(monkeypatch, tmp_path, *, steps: int = 2):
     return cfg, contract, run_dir, summary
 
 
+@pytest.mark.parametrize(("snapshot_every", "expected"), [(None, [1, 2, 3, 4, 5]), (3, [3])])
+def test_train_dflash_snapshot_cadence(monkeypatch, tmp_path, snapshot_every, expected):
+    _model, _processor, contract, run_dir, cfg, _source = _tiny_train_setup(monkeypatch, tmp_path)
+    _patch_tiny_draft_build(monkeypatch)
+    _patch_drafter_visual_check(monkeypatch)
+    cfg["train"].update(save_every_steps=1, milestone_snapshots=True)
+    if snapshot_every is not None:
+        cfg["train"]["snapshot_every_steps"] = snapshot_every
+    train_dflash(cfg, run_dir, contract, steps=6, feature_mode="online")
+    train_dir = run_dir / "train"
+    # The resumable state follows save_every_steps; eval snapshots follow their own cadence.
+    assert (train_dir / "ckpt_last.pt").exists() and (train_dir / "ckpt_final.pt").exists()
+    snapshots = sorted(int(path.stem.removeprefix("ckpt_step")) for path in train_dir.glob("ckpt_step*.pt"))
+    assert snapshots == expected
+
+
+def test_train_dflash_rejects_bad_snapshot_cadence(monkeypatch, tmp_path):
+    _model, _processor, contract, run_dir, cfg, _source = _tiny_train_setup(monkeypatch, tmp_path)
+    _patch_tiny_draft_build(monkeypatch)
+    _patch_drafter_visual_check(monkeypatch)
+    cfg["train"].update(milestone_snapshots=True, snapshot_every_steps=0)
+    with pytest.raises(ValueError, match="snapshot_every_steps"):
+        train_dflash(cfg, run_dir, contract, steps=2, feature_mode="online")
+
+
 def test_train_dflash_resume_write_order_online(monkeypatch, tmp_path):
     cfg, contract, run_dir, summary = _tiny_online_train_run(monkeypatch, tmp_path)
     assert summary["steps"] == 2 and summary["feature_mode"] == "online"

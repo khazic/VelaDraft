@@ -1326,6 +1326,12 @@ def train_dflash(
         else:
             save_every = int(train_cfg.get("save_every_steps", max(1, total_steps // 4)))
         milestone_snapshots = bool(train_cfg.get("milestone_snapshots", False))
+        # Snapshots can be sparser than the resumable saves (e.g. resume state
+        # every 1,250 updates, eval snapshots every 12,500); unset = every save.
+        snapshot_every = train_cfg.get("snapshot_every_steps")
+        snapshot_every = int(snapshot_every) if snapshot_every is not None else None
+        if snapshot_every is not None and snapshot_every < 1:
+            raise ValueError(f"train.snapshot_every_steps must be >= 1, got {snapshot_every}.")
         from ..objectives import resolve_recipe as _resolve_recipe
 
         _recipe = _resolve_recipe(cfg, algorithm.name)
@@ -1335,7 +1341,8 @@ def train_dflash(
             extra_save_steps.add(int(boundary_step))
         log(
             f"train: save cadence every {save_every} steps "
-            f"(stage boundary step={boundary_step}, milestone_snapshots={milestone_snapshots})"
+            f"(stage boundary step={boundary_step}, milestone_snapshots={milestone_snapshots}, "
+            f"snapshot_every_steps={snapshot_every})"
         )
 
         resume_dir_cfg = train_cfg.get("resume_state_dir")
@@ -1356,7 +1363,12 @@ def train_dflash(
             # every scheduled save ALSO drops the pure trainable weights in the
             # same ``vlm-dflash-ckpt-v1`` format eval loads. The final step is
             # covered by ckpt_final.pt and is skipped here.
-            if milestone_snapshots and int(state["step"]) < total_steps:
+            snapshot_due = (
+                snapshot_every is None
+                or int(state["step"]) % snapshot_every == 0
+                or int(state["step"]) in extra_save_steps
+            )
+            if milestone_snapshots and snapshot_due and int(state["step"]) < total_steps:
                 snapshot_path = train_dir / f"ckpt_step{int(state['step']):07d}.pt"
                 snapshot_tmp = snapshot_path.with_name(snapshot_path.name + ".tmp")
                 torch.save(
