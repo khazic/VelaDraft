@@ -255,14 +255,21 @@ def teacher_section(args, model, processor, contract: dict, rows: list[dict], me
         str(layer): max_abs(record["hidden"][:, i * width:(i + 1) * width], hs[layer + 1][0].cpu())
         for i, layer in enumerate(LAYER_IDS)
     }
-    head = model.lm_head(hs[-1][0, -4:]).float()
-    final_vs_logits = max_abs(head, out.logits[0, -4:])
+    # Same-shape recompute: the forward applies lm_head to the whole h[-1], so
+    # the identical GEMM must reproduce the logits; a different shape differs
+    # only by bf16 rounding (recorded) with the same greedy token.
+    head = model.lm_head(hs[-1])
+    final_vs_logits = max_abs(head, out.logits)
+    top1_agree = float((head.argmax(-1) == out.logits.argmax(-1)).float().mean())
+    partial_vs_logits = max_abs(model.lm_head(hs[-1][0, -4:]), out.logits[0, -4:])
     final_vs_record = max_abs(record["final_hidden"], hs[-1][0].cpu())
     report["teacher"] = {
         "num_hidden_states": len(hs), "resolved_hidden_state_indices": [layer + 1 for layer in LAYER_IDS],
         "record_hidden": [list(record["hidden"].shape), str(record["hidden"].dtype), str(record["hidden"].device)],
         "record_final_hidden": [list(record["final_hidden"].shape), str(record["final_hidden"].dtype)],
         "layer_mapping_max_abs": mapping, "lm_head_final_vs_logits_max_abs": final_vs_logits,
+        "lm_head_final_vs_logits_top1_agreement": top1_agree,
+        "lm_head_last4_positions_vs_logits_max_abs": partial_vs_logits,
         "final_hidden_vs_record_max_abs": final_vs_record, "requires_grad": bool(record["hidden"].requires_grad),
     }
     (Path(args.out) / "hidden_layer_mapping.json").write_text(json.dumps({
@@ -270,8 +277,9 @@ def teacher_section(args, model, processor, contract: dict, rows: list[dict], me
         "store_final_hidden": True, "num_hidden_states": len(hs),
     }, indent=2))
     gate("hidden_layer_mapping", len(hs) == 37 and max(mapping.values()) == 0.0, mapping)
-    gate("final_hidden_semantics", final_vs_logits < 1e-2 and final_vs_record == 0.0,
-         {"lm_head(h[-1]) vs logits": final_vs_logits, "record vs h[-1]": final_vs_record})
+    gate("final_hidden_semantics", final_vs_logits == 0.0 and top1_agree == 1.0 and final_vs_record == 0.0,
+         {"lm_head(h[-1]) vs logits": final_vs_logits, "top1_agreement": top1_agree,
+          "last4_recompute_max_abs (bf16 rounding)": partial_vs_logits, "record vs h[-1]": final_vs_record})
     gate("teacher_no_grad", not record["hidden"].requires_grad and record["hidden"].dtype == torch.bfloat16)
     return records
 
@@ -296,27 +304,91 @@ def visual_section(model, processor, contract: dict, rows: list[dict], media_dir
     gate("visual_path_changes_features", same_ids and min(diffs.values()) > 0.0, diffs)
 
 
-def batch_parity_section(model, processor, contract: dict, rows: list[dict], media_dir: Path) -> None:
-    """online_batch_size 1 vs 2 (and 2 vs 4) on fixed inputs (section 16)."""
+def _feature_drift(left: torch.Tensor, right: torch.Tensor, width: int) -> dict:
+    """Per captured layer: relative L2 drift, cosine, max abs diff and the layer's own max |value|."""
+    out = {}
+    for i, layer in enumerate(LAYER_IDS):
+        a = left[:, i * width:(i + 1) * width].float()
+        b = right[:, i * width:(i + 1) * width].float()
+        out[str(layer)] = {
+            "rel_l2": float((a - b).norm() / a.norm()),
+            "cosine": float(torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0)),
+            "max_abs": float((a - b).abs().max()), "max_value": float(a.abs().max()),
+        }
+    return out
+
+
+def batch_parity_section(model, processor, contract: dict, rows: list[dict], media_dir: Path) -> dict:
+    """online_batch_size 1 vs 2 (and 2 vs 4) on fixed inputs (section 16).
+
+    Padding changes the bf16 kernels, so features can only match up to rounding
+    (relative drift is gated, ids / masks / positions must be identical); the
+    loss, valid anchors and greedy-token comparisons follow in loss_parity_section.
+    """
+    width = int(contract["text"]["hidden_size"])
     single = [capture(model, processor, [row], media_dir, contract)[0] for row in rows]
+    batched_by_size = {1: single}
     out = {}
     for size in (2, 4):
         batched = []
         for start in range(0, len(rows), size):
             batched += capture(model, processor, rows[start:start + size], media_dir, contract)
+        batched_by_size[size] = batched
         out[f"batch{size}_vs_batch1"] = {
-            row["id"]: {"hidden": max_abs(s["hidden"], b["hidden"]), "final_hidden": max_abs(s["final_hidden"],
-                        b["final_hidden"]), "ids_equal": bool(torch.equal(s["input_ids"], b["input_ids"])),
-                        "loss_mask_equal": bool(torch.equal(s["loss_mask"], b["loss_mask"]))}
+            row["id"]: {
+                "hidden": _feature_drift(s["hidden"], b["hidden"], width),
+                "final_hidden_rel_l2": float((s["final_hidden"].float() - b["final_hidden"].float()).norm()
+                                             / s["final_hidden"].float().norm()),
+                "ids_equal": bool(torch.equal(s["input_ids"], b["input_ids"])),
+                "loss_mask_equal": bool(torch.equal(s["loss_mask"], b["loss_mask"])),
+                "position3_equal": bool(torch.equal(s["position3"], b["position3"])),
+            }
             for row, s, b in zip(rows, single, batched)
         }
     report["online_batch_parity"] = out
-    # Padding changes bf16 kernel shapes, so features match at the bf16 rounding
-    # scale (recorded), while ids / masks / positions must be identical.
-    worst = max(v["hidden"] for v in out["batch2_vs_batch1"].values())
-    gate("online_batch_parity", all(v["ids_equal"] and v["loss_mask_equal"] for d in out.values() for v in d.values())
-         and worst < 0.5, {"batch2_max_abs_hidden": worst,
-                           "batch4_max_abs_hidden": max(v["hidden"] for v in out["batch4_vs_batch1"].values())})
+    exact = all(v["ids_equal"] and v["loss_mask_equal"] and v["position3_equal"] for d in out.values() for v in d.values())
+    worst = max(layer["rel_l2"] for d in out.values() for v in d.values() for layer in v["hidden"].values())
+    worst_final = max(v["final_hidden_rel_l2"] for d in out.values() for v in d.values())
+    gate("online_batch_feature_parity", exact and worst < 2e-2 and worst_final < 2e-2,
+         {"ids_masks_positions_identical": exact, "worst_rel_l2_hidden": worst, "worst_rel_l2_final": worst_final})
+    return batched_by_size
+
+
+def loss_parity_section(contract: dict, model, args, batched_by_size: dict) -> None:
+    """Same drafter, same anchors: loss / valid anchors / greedy tokens per online batch size."""
+    image_token = int(contract["tokens"]["image_token_id"])
+    module, _ = drafter_module("dflash", contract, model, args)
+    module.eval()
+    results = {}
+    for size, records in batched_by_size.items():
+        batch = {key: value.to("cuda:0") if torch.is_tensor(value) else value
+                 for key, value in collate_features(records, image_token).items() if key != "lengths"}
+        torch.manual_seed(4321)
+        with torch.no_grad():
+            metrics = forward(module, batch)
+        greedy = []
+        for record in records:
+            answer = record["loss_mask"].bool()
+            logits = model.lm_head(record["final_hidden"][answer].to("cuda:1"))
+            greedy.append(logits.argmax(-1).cpu())
+        results[size] = {"loss": float(metrics.loss), "valid_blocks": int(metrics.valid_blocks),
+                         "valid_tokens": int(metrics.valid_tokens), "greedy": greedy}
+    base = results[1]
+    detail = {}
+    for size in (2, 4):
+        other = results[size]
+        agree = torch.cat([(a == b).float() for a, b in zip(base["greedy"], other["greedy"])]).mean()
+        detail[f"batch{size}_vs_batch1"] = {
+            "loss": [base["loss"], other["loss"]], "loss_rel_diff": abs(other["loss"] - base["loss"]) / abs(base["loss"]),
+            "valid_blocks": [base["valid_blocks"], other["valid_blocks"]],
+            "valid_tokens": [base["valid_tokens"], other["valid_tokens"]], "greedy_agreement": float(agree),
+        }
+    report["online_batch_loss_parity"] = detail
+    gate("online_batch_loss_parity", all(
+        d["valid_blocks"][0] == d["valid_blocks"][1] and d["valid_tokens"][0] == d["valid_tokens"][1]
+        and d["loss_rel_diff"] < 1e-2 and d["greedy_agreement"] >= 0.99 for d in detail.values()), detail)
+    del module
+    torch.cuda.empty_cache()
 
 
 def transfer_section(records: list[dict]) -> dict:
@@ -511,7 +583,8 @@ def main() -> None:
         rows = real_image_section(args, model, processor, contract, media_dir)
         records = teacher_section(args, model, processor, contract, rows, media_dir)
         visual_section(model, processor, contract, rows, media_dir)
-        batch_parity_section(model, processor, contract, rows, media_dir)
+        batched_by_size = batch_parity_section(model, processor, contract, rows, media_dir)
+        loss_parity_section(contract, model, args, batched_by_size)
         transfer_section(records)
         batch = {key: value.to("cuda:0") if torch.is_tensor(value) else value
                  for key, value in collate_features(capture(model, processor, rows[:2], media_dir, contract),
