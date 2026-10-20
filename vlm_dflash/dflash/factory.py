@@ -35,6 +35,15 @@ def build_draft_config(contract: dict, cfg: dict):
         raise ValueError(
             "Target text config has no dense intermediate_size (MoE target); set drafter.intermediate_size."
         )
+    # The draft inherits the target's width and attention shape. A config may
+    # state them to pin the experiment contract; a stated value that the target
+    # does not resolve to fails loud instead of being ignored.
+    for key in ("hidden_size", "num_attention_heads", "num_key_value_heads", "head_dim"):
+        if drafter.get(key) is not None and int(drafter[key]) != int(draft.get(key) or 0):
+            raise ValueError(
+                f"drafter.{key}={drafter[key]} disagrees with the target text config ({key}={draft.get(key)}); "
+                "the draft inherits it from the target."
+            )
     draft["num_target_layers"] = int(contract["layers"]["num_target_layers"])
     # Per-layer width of the captured target features (the fusion models need it
     # to validate their stacked context; equal to the draft width in this stack).
