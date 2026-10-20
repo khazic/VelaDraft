@@ -69,10 +69,27 @@ def main() -> None:
             rejected.append({"id": row_id, "error": str(error)[:200]})
             continue
         verdicts[kind] += 1
+    # Negative control on the same real rows: one answer token changed to another
+    # text token must be rejected (changed decoded text is drift, not a split).
+    controls: Counter = Counter()
+    for row_id in sorted(drift_ids)[:20]:
+        request, output, row = requests[row_id], outputs[row_id], rows[row_id]
+        prompt_ids = [int(token) for token in request["prompt_ids"]]
+        answer_ids = [int(token) for token in output["answer_ids"]]
+        mutated = list(answer_ids)
+        mutated[len(mutated) // 2] = processor.tokenizer.convert_tokens_to_ids("Z")
+        answer_text = processor.tokenizer.decode(answer_ids[:-1], skip_special_tokens=False)
+        try:
+            _verify_last_turn_render(processor, row, media_dir, prompt_ids + mutated, int(request["target_index"]),
+                                     answer_text)
+            controls["wrongly_accepted"] += 1
+        except RuntimeError:
+            controls["rejected"] += 1
     report = {"run": str(run), "historical_render_drift_rows": len(drift_ids), "verdicts": dict(verdicts),
-              "rejected": rejected}
+              "rejected": rejected, "negative_control_mutated_answers": dict(controls)}
     args.out.write_text(json.dumps(report, indent=2))
-    print(json.dumps({key: report[key] for key in ("historical_render_drift_rows", "verdicts")}))
+    print(json.dumps({key: report[key] for key in ("historical_render_drift_rows", "verdicts",
+                                                   "negative_control_mutated_answers")}))
     print("REPLAY_DONE")
 
 
