@@ -62,6 +62,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--calib-from", type=int, default=11)
     parser.add_argument("--gpu-samples", type=Path, default=None)
+    parser.add_argument("--save-every", type=int, default=8,
+                        help="the smoke's checkpoint cadence: the update after each save also carries the save's wall")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     a, b = _rows(args.run_a), _rows(args.run_b)
@@ -86,9 +88,13 @@ def main() -> None:
     overfit = json.loads((args.run_a / "train" / "overfit_sanity.json").read_text())
     summary_a = json.loads((args.run_a / "train" / "train_summary.json").read_text())
     calib = [row for step, row in sorted(a.items()) if step >= args.calib_from]
-    stages = sorted({key for row in calib for key in row if key.startswith("time_")})
-    timing = {key: round(statistics.mean(row.get(key, 0.0) for row in calib), 4) for key in stages}
-    step_times = sorted(row["time_step"] for row in calib if "time_step" in row)
+    # A smoke checkpoints every few updates (a formal row every 1,250): the state write
+    # lands in the next update's loader time, so those updates are left out of the rates.
+    steady = [row for row in calib if (int(row["step"]) - 1) % args.save_every != 0] or calib
+    stages = sorted({key for row in steady for key in row if key.startswith("time_")})
+    timing = {key: round(statistics.mean(row.get(key, 0.0) for row in steady), 4) for key in stages}
+    step_times = sorted(row["time_step"] for row in steady if "time_step" in row)
+    with_saves = [row["time_step"] for row in calib if "time_step" in row]
     window = None
     window_file = args.run_a.parent / "run_a.window"
     if window_file.exists():
@@ -106,7 +112,9 @@ def main() -> None:
         },
         "overfit_sanity": overfit,
         "calibration": {
-            "updates": len(calib), "from_update": args.calib_from,
+            "updates": len(calib), "from_update": args.calib_from, "steady_updates": len(steady),
+            "excluded": f"the {len(calib) - len(steady)} update(s) right after a checkpoint write (save every {args.save_every})",
+            "sec_per_update_mean_including_saves": round(statistics.mean(with_saves), 3) if with_saves else None,
             "sec_per_update_mean": round(statistics.mean(step_times), 3) if step_times else None,
             "sec_per_update_p50": step_times[len(step_times) // 2] if step_times else None,
             "sec_per_update_p90": step_times[int(len(step_times) * 0.9)] if step_times else None,
