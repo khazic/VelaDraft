@@ -23,7 +23,9 @@ def main() -> None:
             rows.append({"run": run.name, "status": "no_window"})
             continue
         window = json.loads(path.read_text().splitlines()[-1])
-        _, method, stage, arm, layout = run.name.split("_", 4)
+        camp_cfg = json.loads((run / "config.json").read_text())["campaign"]
+        method, arm, layout = camp_cfg["method"], camp_cfg["arm"], camp_cfg["layout"]
+        stage = run.name[len(f"pilot_{method}_") : -len(f"_{arm}_{layout}")]
         gpus = 1 if layout == "single" else 2
         peaks = window["peak"]
         rows.append({
