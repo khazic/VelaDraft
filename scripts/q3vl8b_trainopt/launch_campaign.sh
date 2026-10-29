@@ -21,7 +21,8 @@ phase=$1
 mkdir -p "$CAMPAIGN"/{configs,provenance,manifests,raw,tables,work,scripts}
 
 if [ "$phase" = configs ]; then
-  python3 "$HERE/make_configs.py" --old-task "$OLD" --devtest "$DEVTEST" --out "$CAMPAIGN/configs" --work "$CAMPAIGN/work"
+  python3 "$HERE/make_configs.py" --old-task "$OLD" --devtest "$DEVTEST" --out "$CAMPAIGN/configs" --work "$CAMPAIGN/work" \
+    --local "$VELA_LOCAL"
   cp "$HERE"/*.sh "$HERE"/*.py "$CAMPAIGN/scripts/"
   cp "$TRAINOPT_ENV" "$CAMPAIGN/scripts/node_env.sh"
   {
@@ -46,6 +47,9 @@ EOF
 fi
 
 python3 "$HERE/jobs.py" "$phase" "$CAMPAIGN" > "$CAMPAIGN/raw/jobs_$phase.json"
+if ! ps -eo args | grep -qE "^bash \S*gpu_sampler\.sh $CAMPAIGN\$"; then
+  setsid -f nohup bash "$HERE/gpu_sampler.sh" "$CAMPAIGN" > /dev/null 2>&1 < /dev/null
+fi
 setsid -f nohup python3 -u "$HERE/scheduler.py" --jobs "$CAMPAIGN/raw/jobs_$phase.json" \
   --state-dir "$CAMPAIGN/raw/scheduler_$phase" --gpus "$GPUS" >> "$CAMPAIGN/raw/scheduler_$phase.log" 2>&1 < /dev/null
 echo "phase $phase scheduled (log $CAMPAIGN/raw/scheduler_$phase.log)"

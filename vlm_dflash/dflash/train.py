@@ -207,6 +207,25 @@ def gather_train_state(
     return state
 
 
+class _ReplayIterator:
+    """Recorded micro-batches (``mb*.pt``), preloaded and served in order, cycling forever."""
+
+    def __init__(self, directory: Path):
+        files = sorted(directory.glob("mb*.pt"))
+        if not files:
+            raise FileNotFoundError(f"train.feature_replay: no recorded micro-batches in {directory}.")
+        self.batches = [torch.load(path, map_location="cpu", weights_only=False) for path in files]
+        self.position = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch = self.batches[self.position % len(self.batches)]
+        self.position += 1
+        return batch
+
+
 def _expected_recipe_stage(cfg: dict, algorithm_name: str, *, step: int, total_steps: int) -> int | None:
     """The stage a run with ``cfg`` computes at ``step`` (``None`` without a recipe)."""
     from ..objectives import resolve_recipe
@@ -644,6 +663,22 @@ def run_training_loop(
     # that can skip without compute (the online target source) answer with
     # cheap placeholders instead of re-extracting teacher features, so a resume
     # does not pay the target forward cost again.
+    # Drafter-only timing scope: ``record`` stores the first ``microbatches``
+    # collated micro-batches (real teacher features) under ``dir``; ``replay``
+    # preloads them into host memory and feeds them in a cycle instead of the
+    # loader, so no target forward and no data fast-forward run.
+    replay_cfg = train_cfg.get("feature_replay") or {}
+    replay_mode = replay_cfg.get("mode")
+    recorder = None
+    if replay_mode == "replay":
+        iterator = _ReplayIterator(Path(replay_cfg["dir"]))
+        consumed = 0
+        log(f"train: feature replay of {len(iterator.batches)} recorded micro-batches from {replay_cfg['dir']}")
+    elif replay_mode == "record":
+        recorder = {"dir": Path(replay_cfg["dir"]), "left": int(replay_cfg["microbatches"]), "index": 0}
+        recorder["dir"].mkdir(parents=True, exist_ok=True)
+    elif replay_mode not in (None, "", "off"):
+        raise ValueError(f"train.feature_replay.mode must be record or replay, got {replay_mode!r}.")
     fast_forward_batches = consumed
     skip_begin = getattr(base_dataset, "start_fast_forward", None)
     # Online cache planning hook: a natural epoch end (never the end-of-run
@@ -693,6 +728,10 @@ def run_training_loop(
                 break
             compute_started = time.perf_counter()
             instrument.data_s += compute_started - fetch_started
+            if recorder is not None and recorder["left"] > 0:
+                torch.save(batch, recorder["dir"] / f"mb{recorder['index']:06d}.pt")
+                recorder["index"] += 1
+                recorder["left"] -= 1
             batch_lengths = batch.get("lengths")
             batch = {key: value for key, value in batch.items() if key != "lengths"}
             batch = {

@@ -67,6 +67,11 @@ SCALING_MICRO_BATCHES = [2, 4, 8]
 WINDOW = {"warmup": 50, "measured": 500}
 SCALING = {"warmup": 20, "measured": 200}
 PILOT = {"warmup": 20, "measured": 50}
+DRAFTER = {"warmup": 20, "measured": 200}  # drafter-only scope on recorded teacher features
+
+
+def replay_dir(local: Path, method: str, stage: str, pair: int) -> Path:
+    return local / "replay" / f"{method}_{stage}_p{pair}"
 
 
 def snapshot(work: Path, method: str, step: int) -> Path:
@@ -146,6 +151,7 @@ def main() -> None:
     parser.add_argument("--devtest", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--work", required=True, type=Path, help="campaign run directories (work/<run name>)")
+    parser.add_argument("--local", required=True, type=Path, help="node-local scratch (feature recordings)")
     args = parser.parse_args()
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
@@ -221,6 +227,21 @@ def main() -> None:
                     f"window/{method}_{stage}_p{pair}_{arm}.json",
                     build(base, method, arm, name=f"window_{method}_{stage}_p{pair}_{arm}", purpose="window",
                           **bounded(step, WINDOW, fork)),
+                )
+            # Drafter training update scope: one recording per snapshot, replayed by every arm.
+            record_dir = replay_dir(args.local, method, stage, pair)
+            write(
+                f"replay/{method}_{stage}_p{pair}_record.json",
+                build(base, method, "ref", name=f"replay_{method}_{stage}_p{pair}_record", purpose="window",
+                      feature_replay={"mode": "record", "dir": str(record_dir),
+                                      "microbatches": (DRAFTER["warmup"] + DRAFTER["measured"]) * GLOBAL_BATCH // 2},
+                      **bounded(step, DRAFTER, fork)),
+            )
+            for arm in WINDOW_ARMS[(method, stage)]:
+                write(
+                    f"replay/{method}_{stage}_p{pair}_{arm}.json",
+                    build(base, method, arm, name=f"replay_{method}_{stage}_p{pair}_{arm}", purpose="window",
+                          feature_replay={"mode": "replay", "dir": str(record_dir)}, **bounded(step, DRAFTER, fork)),
                 )
             for arm in ("ref", "opt"):
                 for mb in SCALING_MICRO_BATCHES:

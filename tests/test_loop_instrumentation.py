@@ -130,3 +130,19 @@ def test_validation_hook_boundaries():
     assert calls[0] == (0, False, False)
     assert [call[0] for call in calls if not call[1]] == [0, 1, 2, 3, 4, 5, 6]
     assert calls[-1] == (6, False, True)
+
+
+def test_feature_replay_reproduces_the_recorded_updates(tmp_path):
+    states = {}
+    _run(_cfg(), sink=lambda state: states.setdefault(state["step"], state))
+    record = copy.deepcopy(states[2])
+    record["fork"] = True
+    replay_dir = tmp_path / "replay"
+    recorded = _run(_cfg(feature_replay={"mode": "record", "dir": str(replay_dir), "microbatches": 8}),
+                    resume_state=record)
+    assert len(list(replay_dir.glob("mb*.pt"))) == 8
+    replay = copy.deepcopy(states[2])
+    replay["fork"] = True
+    replayed = _run(_cfg(feature_replay={"mode": "replay", "dir": str(replay_dir)}), resume_state=replay)
+    for mine, ref in zip(replayed["history"], recorded["history"]):
+        assert mine["loss"] == pytest.approx(ref["loss"], abs=1e-9)

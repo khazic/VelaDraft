@@ -68,11 +68,15 @@ def destination(raw: Path, name: str) -> Path | None:
         method, pair, arm = parts[1], parts[-2], parts[-1]
         stage = "_".join(parts[2:-2])
         return raw / "windows" / method / stage / "ablation" / pair / arm
+    if parts[0] == "replay":  # replay_<method>_<stage...>_p<k>_<arm|record>
+        method, pair, arm = parts[1], parts[-2], parts[-1]
+        stage = "_".join(parts[2:-2])
+        return raw / "windows" / method / stage / "drafter_replay" / pair / arm
     if parts[0] == "scaling":  # scaling_<method>_<stage...>_p<k>_<arm>_mb<n>
         method, pair, arm, mb = parts[1], parts[-3], parts[-2], parts[-1]
         stage = "_".join(parts[2:-3])
         return raw / "windows" / method / stage / "batch_scaling" / pair / f"{arm}_{mb}"
-    if parts[0] in ("pilot", "probe", "numcheck", "init", "replay", "profile"):
+    if parts[0] in ("pilot", "probe", "numcheck", "init", "profile"):
         return raw / "pilot" / parts[0] / name
     return None
 
@@ -129,6 +133,9 @@ def main() -> None:
                      if line.strip() and json.loads(line)["split"] == "test"]
             if tests:
                 (dst / "final_test.json").write_text(json.dumps(tests, indent=1))
+    samples = raw / "gpu_samples.jsonl"
+    if samples.exists():
+        export_text(samples, raw / "gpu_samples.jsonl.gz", args.redact_gpu, gz=True)
     for name in ("gpu_time_ledger.jsonl",):
         for ledger in raw.glob(f"scheduler_*/{name}"):
             export_text(ledger, raw / f"{ledger.parent.name}_{name}", args.redact_gpu)

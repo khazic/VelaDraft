@@ -114,6 +114,13 @@ def main_phase(camp: Path) -> list[dict]:
                 (f"window_{method}_{stage}_p{pair}_{arm}", f"window/{method}_{stage}_p{pair}_{arm}.json",
                  [_snap(camp, method, step)]) for arm in order
             )
+            # Drafter-only scope right after the online windows of the same snapshot.
+            windows[method].append((f"replay_{method}_{stage}_p{pair}_record",
+                                    f"replay/{method}_{stage}_p{pair}_record.json", [_snap(camp, method, step)]))
+            windows[method].extend(
+                (f"replay_{method}_{stage}_p{pair}_{arm}", f"replay/{method}_{stage}_p{pair}_{arm}.json", [])
+                for arm in order
+            )
             scaling.setdefault(method, []).extend(
                 (f"scaling_{method}_{stage}_p{pair}_{arm}_mb{mb}",
                  f"scaling/{method}_{stage}_p{pair}_{arm}_mb{mb}.json", [_snap(camp, method, step)])
@@ -123,6 +130,13 @@ def main_phase(camp: Path) -> list[dict]:
              6: probes[6] + scaling["dflash2"], 7: probes[7] + scaling["dfly"]}
     for gpu, items in lanes.items():
         jobs += _lane(gpu, items, camp)
+    # The last replay arm of a snapshot frees that recording (tens of GB of node-local memory).
+    last_arm: dict[str, dict] = {}
+    for job in jobs:
+        if job["name"].startswith("replay_") and not job["name"].endswith("_record"):
+            last_arm[job["name"].rsplit("_", 1)[0]] = job
+    for prefix, job in last_arm.items():
+        job["post"] = [f"drop_recording:{prefix[len('replay_'):]}"]
     return jobs
 
 

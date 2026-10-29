@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -62,7 +63,12 @@ def post_freeze_init(job: dict, _arg: str) -> None:
     link(train / "ckpt_last.pt", train / "init_state.pt")
 
 
-HOOKS = {"seed_from_init": pre_seed_from_init, "freeze_init": post_freeze_init}
+def post_drop_recording(_job: dict, arg: str) -> None:
+    """Free a replayed feature recording (node-local tmpfs)."""
+    shutil.rmtree(LOCAL / "replay" / arg, ignore_errors=True)
+
+
+HOOKS = {"seed_from_init": pre_seed_from_init, "freeze_init": post_freeze_init, "drop_recording": post_drop_recording}
 
 
 def run_hooks(job: dict, key: str) -> None:
