@@ -51,7 +51,8 @@ mkdir -p "$ARCHIVE"
 cp "$OUT" "$ARCHIVE/" 2>/dev/null || true
 EV=${OUT%.json}.evidence
 if [ -d "$EV" ]; then
-  tar -C "$(dirname "$EV")" --exclude='*/cache' --exclude='*/inductor' -czf "$ARCHIVE/evidence.tar.gz" "$(basename "$EV")"
+  # A handful of JSON/log files; the per-stage compile caches stay node-local.
+  tar -C "$(dirname "$EV")" --exclude='*/cache' --exclude='*/inductor' -cf - "$(basename "$EV")" | tar -C "$ARCHIVE" -xf -
 fi
 echo "LANE_EXIT=$RC $(date '+%F %T')"
 exit $RC
