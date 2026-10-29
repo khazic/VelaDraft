@@ -118,5 +118,5 @@ class GPULease:
         if self.watcher_error is not None:raise ValueError('GPU resource watcher failed: '+self.watcher_error)
         if not self.rows or self.rows[0]['phase']!='start' or self.rows[-1]['phase']!='end':raise ValueError('GPU resource coverage incomplete')
         if any(row.get('foreign_pids') or row.get('error') for row in self.rows):raise ValueError('GPU resource evidence contaminated; whole result invalid')
-        return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,gpu_uuids=self.uuids,
+        return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,gpu_uuids=getattr(self,'uuids',None) or [self.uuid],
                     began_wall_ns=self.rows[0]['began_wall_ns'],ended_wall_ns=self.rows[-1]['ended_wall_ns'])
