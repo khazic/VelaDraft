@@ -7,13 +7,10 @@
 set -euo pipefail
 METHOD=$1 GPUS=$2 SOURCE=$3 NUM=$4 REPEATS=$5 NAME=$6
 
-L=/llm-align/liuchonghan
-REPO=$L/VelaDraft-q36eval
-PY=$L/envs/veladraft_native022/bin/python
-TASK=$L/runs/veladraft/qwen36_native_eval
-SHM=/dev/shm/liuchonghan_q36eval
-TARGET=$L/models/Qwen3.6-35B-A3B
-IMAGES=$L/datasets/MMSpec_repo/dataset/MMSpec/test/images
+# Machine paths come from a site file kept outside the repository, defining
+# REPO PY TASK SHM TARGET IMAGES (and optionally HF_HOME).
+: "${Q36_SITE:?set Q36_SITE to the site env file}"
+source "$Q36_SITE"
 DRAFT=$TASK/exports/$METHOD
 MANIFEST=$TASK/exports/${METHOD}_runtime.json
 OUT=$SHM/runs/$NAME/result.json
@@ -29,7 +26,7 @@ TEMPLATE_KWARGS='{"enable_thinking": false}'
 
 mkdir -p "$SHM/runs" "$SHM/gpu_locks" "$SHM/triton" "$SHM/xdg" "$TASK/logs"
 export PYTHONPATH=$REPO
-export HF_HOME=$L/hf_cache HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export TRITON_CACHE_DIR=$SHM/triton XDG_CACHE_HOME=$SHM/xdg
 export QWEN8B_DIGEST_CACHE=$SHM/digests.sqlite
 export VELADRAFT_GPU_LOCK_DIR=$SHM/gpu_locks
