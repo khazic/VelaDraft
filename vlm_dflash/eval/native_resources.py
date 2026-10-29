@@ -87,6 +87,7 @@ class GPULease:
         try:
             if getattr(self,'mode','pid')=='count':
                 row['ownership']='count';row['per_gpu_pids']=self.per_gpu_pids(uuids)
+                row['per_gpu_memory_mib']={u:int(query('-i',u,'--query-gpu=memory.used')) for u in uuids}
                 row['reported_pids']=sorted({p for v in row['per_gpu_pids'].values() for p in v})
                 row['over_bound']=[u for u,v in row['per_gpu_pids'].items() if len(v)>(0 if phase in ('start','boundary') else self.max_own_apps)]
                 row['foreign_pids']=[];row['stale_observed_own_pids']=[]
@@ -153,6 +154,9 @@ class GPULease:
             raise ValueError('GPU carried unexpected compute apps (count ownership mode); whole result invalid')
         if not self.rows or self.rows[0]['phase']!='start' or self.rows[-1]['phase']!='end':raise ValueError('GPU resource coverage incomplete')
         if any(row.get('foreign_pids') or row.get('error') for row in self.rows):raise ValueError('GPU resource evidence contaminated; whole result invalid')
+        memory=[row['per_gpu_memory_mib'] for row in self.rows if 'per_gpu_memory_mib' in row]
+        peak={u:max(m[u] for m in memory) for u in memory[0]} if memory else None
         return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,gpu_uuids=getattr(self,'uuids',None) or [self.uuid],
+                    peak_memory_used_mib=peak,
                     ownership_mode=getattr(self,'mode','pid'),max_own_apps_per_gpu=getattr(self,'max_own_apps',None),
                     began_wall_ns=self.rows[0]['began_wall_ns'],ended_wall_ns=self.rows[-1]['ended_wall_ns'])

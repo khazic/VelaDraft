@@ -158,13 +158,18 @@ def main():
             prior=json.loads((args.directory/'reference.json').read_text())
             if prior['status']!='complete':raise ValueError('A complete native reference is required')
             reference={(r['id'],r['turn']):r for r in prior['rows']}
+        # Per-request official counters only in a separate stats-enabled supplement
+        # (disable_log_stats=False); primary timing runs never poll metrics per request.
+        per_request=arm=='sd' and kwargs.get('disable_log_stats') is False
         for phase in (('reference',) if args.stage=='reference' else ('warmup','timed')):
             before=metrics(llm) if arm=='sd' and phase=='timed' else None
             for session in plan['sessions']:
                 for turn in range(len(session['questions'])):
                     try:
+                        start=metrics(llm) if per_request and phase=='timed' else None
                         row=request(llm,processor,params,torch,Image,session,turn,reference,plan)
                         row['phase']=phase
+                        if start is not None:row['official_counters']=metric_delta(start,metrics(llm))
                         if phase!='reference' and row['prompt_token_ids']!=reference[(session['id'],turn)]['prompt_token_ids']:
                             raise ValueError('Physical input tokens differ from canonical history')
                     except Exception as error:
