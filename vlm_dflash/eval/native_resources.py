@@ -63,12 +63,14 @@ def classify_gpu_pids(reported, descendants_now, known_recent_own, status):
 
 
 class GPULease:
+    """Lease one GPU index or a list of indices (tensor parallel); all are sampled together."""
     def __init__(self,index,path):
-        self.index=index;self.path=Path(path);self.rows=[];self.stop=threading.Event();self.lock=None;self.recent_own_gpu_pids={};self.proc_complete=process_visibility_complete();self.watcher_error=None
+        self.indices=[index] if isinstance(index,int) else list(index)
+        self.index=self.indices[0];self.path=Path(path);self.rows=[];self.stop=threading.Event();self.locks=[];self.recent_own_gpu_pids={};self.proc_complete=process_visibility_complete();self.watcher_error=None
     def sample(self,phase):
-        row={'phase':phase,'began_wall_ns':time.time_ns(),'gpu_uuid':self.uuid}
+        row={'phase':phase,'began_wall_ns':time.time_ns(),'gpu_uuid':self.uuid,'gpu_uuids':self.uuids}
         try:
-            pids={int(v) for v in query('-i',self.uuid,'--query-compute-apps=pid').splitlines() if v.strip()}
+            pids={int(v) for uuid in self.uuids for v in query('-i',uuid,'--query-compute-apps=pid').splitlines() if v.strip()}
             live=descendants();now=time.monotonic()
             for pid in pids & live:self.recent_own_gpu_pids[pid]=now
             recent={pid for pid,seen in self.recent_own_gpu_pids.items() if now-seen<=10}
@@ -80,13 +82,15 @@ class GPULease:
         row['ended_wall_ns']=time.time_ns();self.rows.append(row)
         with self.path.open('a') as stream:stream.write(json.dumps(row)+'\n')
     def __enter__(self):
-        self.uuid=normalize_uuid(query('-i',str(self.index),'--query-gpu=uuid'))
+        self.uuids=[normalize_uuid(query('-i',str(i),'--query-gpu=uuid')) for i in self.indices]
+        self.uuid=self.uuids[0]
         root=Path('/tmp/veladraft_gpu_locks');root.mkdir(exist_ok=True)
-        self.lock=(root/(self.uuid+'.lock')).open('a')
         try:
-            fcntl.flock(self.lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            if query('-i',self.uuid,'--query-compute-apps=pid') or int(query('-i',self.uuid,'--query-gpu=memory.used'))>=500:
-                raise ValueError('GPU is occupied; no foreign process is stopped')
+            for uuid in self.uuids:
+                lock=(root/(uuid+'.lock')).open('a');self.locks.append(lock)
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                if query('-i',uuid,'--query-compute-apps=pid') or int(query('-i',uuid,'--query-gpu=memory.used'))>=500:
+                    raise ValueError('GPU is occupied; no foreign process is stopped')
             self.sample('start')
             def poll():
                 try:
@@ -96,20 +100,22 @@ class GPULease:
                     self.watcher_error=f'{type(error).__name__}: {error}'
             self.thread=threading.Thread(target=poll,daemon=True);self.thread.start();return self
         except BaseException:
-            self.lock.close();raise
+            for lock in self.locks:lock.close()
+            raise
     def __exit__(self,*exc):
         try:
             self.stop.set();self.thread.join(timeout=30)
             if self.thread.is_alive():self.rows.append({'error':'GPU watcher did not finish'})
             self.sample('end')
         finally:
-            try:
-                fcntl.flock(self.lock,fcntl.LOCK_UN)
-            finally:
-                self.lock.close()
+            for lock in self.locks:
+                try:
+                    fcntl.flock(lock,fcntl.LOCK_UN)
+                finally:
+                    lock.close()
     def validate(self):
         if self.watcher_error is not None:raise ValueError('GPU resource watcher failed: '+self.watcher_error)
         if not self.rows or self.rows[0]['phase']!='start' or self.rows[-1]['phase']!='end':raise ValueError('GPU resource coverage incomplete')
         if any(row.get('foreign_pids') or row.get('error') for row in self.rows):raise ValueError('GPU resource evidence contaminated; whole result invalid')
-        return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,
+        return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,gpu_uuids=self.uuids,
                     began_wall_ns=self.rows[0]['began_wall_ns'],ended_wall_ns=self.rows[-1]['ended_wall_ns'])
