@@ -877,7 +877,7 @@ def run_training_loop(
         else:
             stall_epochs = 0
 
-    if on_checkpoint is not None:
+    if on_checkpoint is not None and bool(train_cfg.get("save_final_state", True)):
         # Persist the completed run as the resumable state: a later exact
         # resume of a finished run has zero steps left to replay instead of
         # re-emitting the already-logged tail. (Interrupted runs keep their
@@ -999,8 +999,11 @@ def run_overfit_sanity(cfg: dict, contract: dict, dataset_factory, run_dir: Path
     dataset = dataset_factory()
     subset = Subset(dataset, list(range(min(num_samples, len(dataset)))))
     run_cfg = dict(cfg)
+    # Loop controls of the real run (bounded segments, timing windows) do not
+    # apply to the sanity loop.
+    run_controls = ("stop_at_step", "timing_windows", "timing_segment_every")
     run_cfg["train"] = {
-        **cfg.get("train", {}),
+        **{key: value for key, value in cfg.get("train", {}).items() if key not in run_controls},
         "micro_batch_size": min(num_samples, len(subset)),
         "grad_accumulation_steps": 1,
         "num_epochs": 1,
