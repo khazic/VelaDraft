@@ -65,7 +65,10 @@ def main() -> None:
     checkpoint = args.checkpoint.resolve()
     manifest = {
         "method": args.method, "scope": scope,
-        "bootstrap": str(HERE / bootstrap), "checkpoint": str(checkpoint), "environment": {},
+        "bootstrap": str(HERE / bootstrap), "checkpoint": str(checkpoint),
+        # Target graphs follow the engine (FULL_AND_PIECEWISE); the draft dispatches PIECEWISE:
+        # a FULL draft graph with custom all-reduce faults in vLLM 0.22.1 at TP 2.
+        "environment": {"Q36_DRAFT_CUDAGRAPH": "PIECEWISE"},
         "files": {str(path): sha256(path) for path in (*sources, checkpoint)},
     }
     if args.out.exists():

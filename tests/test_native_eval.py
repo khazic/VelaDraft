@@ -257,3 +257,12 @@ def test_worker_metadata_requires_every_tensor_parallel_rank():
     with pytest.raises(ValueError,match='worker count'):runtime.worker_metadata(LLM([rank]),'sd',p)
     other=copy.deepcopy(rank);other['numeric']={'bf16_reduced':True}
     with pytest.raises(ValueError,match='different'):runtime.worker_metadata(LLM([rank,other]),'sd',p)
+
+
+def test_sd_graph_mode_defaults_to_piecewise_and_admits_native_full():
+    p=plan()
+    assert native().engine_args(p,'sd')['compilation_config']['cudagraph_mode']=='PIECEWISE'
+    p['sd_cudagraph_mode']='FULL_AND_PIECEWISE'
+    config=native().engine_args(p,'sd')['compilation_config']
+    assert config['cudagraph_mode']=='FULL_AND_PIECEWISE' and config['cudagraph_capture_sizes']==[8]
+    assert 'compilation_config' not in native().engine_args(p,'ar')

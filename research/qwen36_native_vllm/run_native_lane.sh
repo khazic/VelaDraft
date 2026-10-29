@@ -23,6 +23,9 @@ GPU_MEM=${GPU_MEM:-0.85}
 MIN_PIXELS=65536
 MAX_PIXELS=1048576
 TEMPLATE_KWARGS='{"enable_thinking": false}'
+SD_GRAPH=FULL_AND_PIECEWISE
+# MMSpec reference construction (evaluation/utils.py build_prompt).
+SYSTEM_PROMPT="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions."
 
 mkdir -p "$SHM/runs" "$SHM/gpu_locks" "$SHM/triton" "$SHM/xdg" "$TASK/logs"
 export PYTHONPATH=$REPO
@@ -38,7 +41,8 @@ ARGS=(--target "$TARGET" --draft "$DRAFT" --source "$SOURCE" --images-dir "$IMAG
       --max-new-tokens "$MAX_NEW_TOKENS" --max-model-len "$MAX_MODEL_LEN"
       --speculative-tokens 7 --gpu-memory-utilization "$GPU_MEM"
       --min-pixels $MIN_PIXELS --max-pixels $MAX_PIXELS
-      --chat-template-kwargs "$TEMPLATE_KWARGS" --out "$OUT")
+      --chat-template-kwargs "$TEMPLATE_KWARGS" --sd-cudagraph-mode "$SD_GRAPH"
+      --system-prompt "$SYSTEM_PROMPT" --out "$OUT")
 ARGS+=(--runtime-manifest "$MANIFEST")
 
 echo "[lane] $(date '+%F %T') $(hostname -I | cut -d' ' -f1) method=$METHOD gpus=$GPUS source=$SOURCE n=$NUM repeats=$REPEATS out=$OUT"

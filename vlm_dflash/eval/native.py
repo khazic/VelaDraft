@@ -65,8 +65,11 @@ def engine_args(plan,arm):
         worker_extension_cls='vlm_dflash.eval.native_runtime.WorkerMetadata')
     if arm=='sd':
         size=plan['speculative_tokens']+1
+        # PIECEWISE (default, the Qwen3-VL-8B protocol) or the engine-native FULL_AND_PIECEWISE
+        # for targets whose split ops make piecewise replay dominate the step (hybrid MoE).
+        graph=plan.get('sd_cudagraph_mode','PIECEWISE')
         args.update(block_size=16,attention_config={'backend':'FLASH_ATTN'},
-            compilation_config=dict(mode=3,cudagraph_mode='PIECEWISE',cudagraph_capture_sizes=[size],max_cudagraph_capture_size=size),
+            compilation_config=dict(mode=3,cudagraph_mode=graph,cudagraph_capture_sizes=[size],max_cudagraph_capture_size=size),
             speculative_config=dict(model=plan['draft'],method='dflash',num_speculative_tokens=plan['speculative_tokens'],
                 draft_tensor_parallel_size=tp,attention_backend='FLASH_ATTN'))
         if plan.get('method','dflash') in ('dspark','domino','dflash2','dflare','dfly'):
@@ -186,6 +189,7 @@ def make_plan(args):
     if args.max_model_len<args.max_new_tokens or not 0<args.gpu_memory_utilization<1:raise ValueError('Invalid context/memory budget')
     if not 0<args.min_pixels<=args.max_pixels:raise ValueError('Invalid image pixel bounds')
     plan={k:getattr(args,k) for k in ('speculative_tokens','max_new_tokens','max_model_len','gpu_memory_utilization','min_pixels','max_pixels','repeats','method')}
+    plan['sd_cudagraph_mode']=getattr(args,'sd_cudagraph_mode','PIECEWISE')
     gpus=resolve_gpus(args)
     template_kwargs=json.loads(args.chat_template_kwargs)
     if not isinstance(template_kwargs,dict):raise ValueError('--chat-template-kwargs must be a JSON object')
@@ -255,6 +259,8 @@ def add_arguments(parser):
     parser.add_argument('--gpus',help='comma-separated GPU indices; tensor parallel size = count (overrides --gpu)')
     parser.add_argument('--chat-template-kwargs',default='{}',help='JSON object passed to apply_chat_template, e.g. {"enable_thinking": false}')
     parser.add_argument('--system-prompt',help='optional system message prepended to every request')
+    parser.add_argument('--sd-cudagraph-mode',choices=('PIECEWISE','FULL_AND_PIECEWISE'),default='PIECEWISE',
+                        help='SD engine graph mode; the draft graph policy belongs to the runtime manifest')
     parser.add_argument('--max-new-tokens',type=int,default=1024);parser.add_argument('--speculative-tokens',type=int,default=7)
     parser.add_argument('--repeats',type=int,default=3);parser.add_argument('--max-model-len',type=int,default=8192)
     parser.add_argument('--gpu-memory-utilization',type=float,default=.45)
