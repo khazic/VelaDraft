@@ -32,10 +32,11 @@ from export_raw import leaks, rules, sanitize
 REPO_ID = "khazic/veladraft-qwen3vl8b-200k-dflash2"
 REPO_TYPE = "model"
 INTERVAL = 1800
+# ``dir/**/*`` (not ``dir/**``, which Path.glob resolves to directories only).
 ALLOW = [
-    "raw/formal/**", "raw/windows/**", "raw/pilot/**", "raw/gpu_samples.jsonl.gz", "raw/*_gpu_time_ledger.jsonl",
-    "raw/export_status.json", "tables/**", "configs/**", "provenance/**", "manifests/**", "checks/**",
-    "scripts/**", "*.md", "schema.json", "artifacts_manifest.json",
+    "raw/formal/**/*", "raw/windows/**/*", "raw/pilot/**/*", "raw/gpu_samples.jsonl.gz", "raw/*_gpu_time_ledger.jsonl",
+    "raw/export_status.json", "tables/**/*", "configs/**/*", "provenance/**/*", "manifests/**/*", "checks/**/*",
+    "scripts/**/*", "*.md", "schema.json", "artifacts_manifest.json",
 ]
 TEXT_SUFFIXES = {".json", ".jsonl", ".md", ".txt", ".py", ".sh", ".diff", ".log", ".csv", ".yaml"}
 SKIP_SUFFIXES = {".srcmtime", ".pt", ".safetensors", ".bin", ".jpg", ".png"}
