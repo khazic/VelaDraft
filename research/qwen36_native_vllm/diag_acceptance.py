@@ -56,6 +56,9 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--system-prompt")
+    parser.add_argument("--graph", choices=["piecewise8", "default"], default="piecewise8")
+    parser.add_argument("--ar", action="store_true", help="no speculative config (AR timing baseline)")
+    parser.add_argument("--repeat", type=int, default=2, help="passes over the sessions; the first is warmup")
     args = parser.parse_args()
     from PIL import Image
     from transformers import AutoProcessor
@@ -66,15 +69,17 @@ def main():
                   mm_processor_cache_gb=0, limit_mm_per_prompt={"image": 1}, enforce_eager=False,
                   generation_config="vllm", disable_log_stats=False,
                   mm_processor_kwargs=dict(min_pixels=65536, max_pixels=1048576),
-                  worker_extension_cls="diag_acceptance.Q36Diag",
-                  attention_config={"backend": "FLASH_ATTN"},
-                  compilation_config=dict(mode=3, cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[8],
-                                          max_cudagraph_capture_size=8),
-                  speculative_config=dict(model=args.draft, method="dflash", num_speculative_tokens=7,
-                                          draft_tensor_parallel_size=tp, attention_backend="FLASH_ATTN",
-                                          use_local_argmax_reduction=False))
-    if args.block_size:
-        kwargs["block_size"] = args.block_size
+                  worker_extension_cls="diag_acceptance.Q36Diag")
+    if not args.ar:
+        kwargs.update(attention_config={"backend": "FLASH_ATTN"},
+                      speculative_config=dict(model=args.draft, method="dflash", num_speculative_tokens=7,
+                                              draft_tensor_parallel_size=tp, attention_backend="FLASH_ATTN",
+                                              use_local_argmax_reduction=False))
+        if args.graph == "piecewise8":
+            kwargs["compilation_config"] = dict(mode=3, cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[8],
+                                                max_cudagraph_capture_size=8)
+        if args.block_size:
+            kwargs["block_size"] = args.block_size
     llm = LLM(**kwargs)
     print("DIAG_WIRING " + json.dumps(llm.collective_rpc("q36_diag")[0], default=str), flush=True)
     processor = AutoProcessor.from_pretrained(args.target, min_pixels=65536, max_pixels=1048576)
@@ -88,7 +93,9 @@ def main():
                 out[metric.name] = getattr(metric, "values", None) or getattr(metric, "value", None)
         return out
 
-    for row in rows:
+    import time
+    import torch
+    for row in rows * args.repeat:
         question = row["conversations"][0]["value"]
         messages = ([{"role": "system", "content": [{"type": "text", "text": args.system_prompt}]}]
                     if args.system_prompt else [])
@@ -97,7 +104,9 @@ def main():
                                                enable_thinking=False)
         image = Image.open(io.BytesIO((Path(args.images_dir) / row["images"][0]).read_bytes())).convert("RGB")
         before = counters()
+        start = time.perf_counter()
         output = llm.generate([{"prompt": prompt, "multi_modal_data": {"image": image}}], params, use_tqdm=False)[0]
+        wall = time.perf_counter() - start
         after = counters()
         delta = {}
         for key, value in after.items():
@@ -108,7 +117,8 @@ def main():
                 delta[key] = value - (old or 0)
         drafts = delta.get("vllm:spec_decode_num_drafts", 0)
         accepted = delta.get("vllm:spec_decode_num_accepted_tokens", 0)
-        print("DIAG_ROW " + json.dumps({"id": row["id"], "tokens": len(output.outputs[0].token_ids),
+        print("DIAG_ROW " + json.dumps({"id": row["id"], "wall": round(wall, 3),
+                                        "tokens": len(output.outputs[0].token_ids),
                                         "drafts": drafts, "accepted": accepted,
                                         "acceptance_length": 1 + accepted / drafts if drafts else None,
                                         "per_position": delta.get("vllm:spec_decode_num_accepted_tokens_per_pos"),

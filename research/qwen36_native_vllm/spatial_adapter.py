@@ -105,19 +105,29 @@ def rotate_context_keys(rotary_emb: Any, context_axes: torch.Tensor,
     return rotated
 
 
+def draft_graph_modes() -> tuple[str, ...]:
+    """Admitted draft graph dispatch for real proposals (PIECEWISE unless the frozen
+    launch also admits FULL via Q36_DRAFT_GRAPH_MODES=PIECEWISE,FULL)."""
+    modes = tuple(m for m in os.environ.get("Q36_DRAFT_GRAPH_MODES", "PIECEWISE").split(",") if m)
+    if not modes or set(modes) - {"PIECEWISE", "FULL"}:
+        raise ValueError(f"Q36_DRAFT_GRAPH_MODES must list PIECEWISE and/or FULL, got {modes}")
+    return modes
+
+
 def validate_scoped_query_batch(num_tokens: int, num_padded: int, mode_name: str,
                                 *, dummy: bool, keys_initialized: bool) -> None:
     block = contract.BLOCK_SIZE
+    modes = draft_graph_modes()
     if dummy:
         if not 1 <= num_tokens <= block or not num_tokens <= num_padded <= block:
             raise ValueError(f"Unsafe dummy query batch {num_tokens} padded to {num_padded}")
-        if mode_name not in ("NONE", "PIECEWISE"):
+        if mode_name not in ("NONE", *modes):
             raise ValueError(f"Unsupported dummy graph dispatch {mode_name}")
         return
     if num_tokens != block or num_padded != block:
         raise ValueError(f"Real spatial proposals require exactly eight query tokens, got {num_tokens}->{num_padded}")
-    if not keys_initialized or mode_name != "PIECEWISE":
-        raise ValueError(f"Real spatial proposals require initialized PIECEWISE dispatch, got {mode_name}")
+    if not keys_initialized or mode_name not in modes:
+        raise ValueError(f"Real spatial proposals require initialized {modes} dispatch, got {mode_name}")
 
 
 def validate_target_head_binding(draft: Any, target_language_model: Any) -> None:
