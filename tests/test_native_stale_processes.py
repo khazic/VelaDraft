@@ -95,7 +95,8 @@ def test_count_ownership_requires_empty_boundaries_and_bounded_apps(resources, t
     monkeypatch.setenv('VELADRAFT_GPU_OWNERSHIP', 'count')
     monkeypatch.setenv('VELADRAFT_GPU_MAX_OWN_APPS', '2')
     seen = {'GPU-a': '', 'GPU-b': ''}
-    monkeypatch.setattr(resources, 'query', lambda *args: seen[args[1]])
+    monkeypatch.setattr(resources, 'query',
+                        lambda *args: '1234' if '--query-gpu=memory.used' in args else seen[args[1]])
     lease = resources.GPULease([0, 1], tmp_path/'gpu.jsonl')
     lease.uuids = ['GPU-a', 'GPU-b']; lease.uuid = 'GPU-a'
     lease.sample('start')
@@ -106,6 +107,7 @@ def test_count_ownership_requires_empty_boundaries_and_bounded_apps(resources, t
     lease.sample('end')
     result = lease.validate()
     assert result['ownership_mode'] == 'count' and result['gpu_uuids'] == ['GPU-a', 'GPU-b']
+    assert result['peak_memory_used_mib'] == {'GPU-a': 1234, 'GPU-b': 1234}
     seen.update({'GPU-a': '900001\n900002\n900009'})
     lease.sample('sample')
     with pytest.raises(ValueError, match='count ownership'):
