@@ -27,6 +27,8 @@ FLOOR = os.environ.get("FLOOR_SCRIPT", "gpu_floor.py")
 LOCAL = Path(os.environ.get("VELA_LOCAL", "/tmp/trainopt"))
 HERE = Path(__file__).resolve().parent
 CORES_PER_GPU = 30
+# Printed by train_dflash right before the training loop (after load, digest and checks).
+TRAIN_LOOP_MARK = "train: save cadence"
 
 
 def now() -> float:
@@ -138,9 +140,11 @@ class Scheduler:
         return None
 
     def launch(self, job: dict, gpus: list[int]) -> None:
+        # The GPUs' floors stay up through the job's startup (target load, data
+        # digest, compile) and are removed once the job reaches its training loop.
         for gpu in gpus:
             self.free.remove(gpu)
-            self.floor_off(gpu)
+            self.floor_on(gpu)
         run_hooks(job, "pre")
         cpus = ",".join(f"{g * CORES_PER_GPU}-{g * CORES_PER_GPU + CORES_PER_GPU - 1}" for g in gpus)
         env = dict(os.environ, CPUS=cpus, THREADS=str(job.get("threads", 8)))
@@ -153,6 +157,21 @@ class Scheduler:
         self.state[job["name"]].update(status="running", gpus=gpus, started=started, pid=proc.pid)
         self.save()
         say(f"START {job['name']} gpus={gpus}")
+
+    def release_floors(self) -> None:
+        """Drop a running job's startup floors right before its training loop starts."""
+        for name, (_, gpus, _) in self.running.items():
+            if not any(gpu in self.floors for gpu in gpus):
+                continue
+            job = next(job for job in self.jobs if job["name"] == name)
+            log = Path(job["run_dir"]) / "stdout.log"
+            try:
+                started_loop = TRAIN_LOOP_MARK in log.read_text(errors="replace")
+            except OSError:
+                started_loop = False
+            if started_loop:
+                for gpu in gpus:
+                    self.floor_off(gpu)
 
     def reap(self) -> None:
         for name, (proc, gpus, started) in list(self.running.items()):
@@ -208,6 +227,7 @@ class Scheduler:
             if jobs_path is not None:
                 self.reload(jobs_path)
             self.reap()
+            self.release_floors()
             pending = [job for job in self.jobs if self.state[job["name"]]["status"] == "pending"]
             for job in pending:
                 if self.blocked(job):

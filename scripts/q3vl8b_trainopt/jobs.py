@@ -88,10 +88,17 @@ def main_phase(camp: Path) -> list[dict]:
     jobs = core(camp)
     for gpu, job in zip(range(4), jobs):
         job["pin"] = [gpu]
+    # The intermediate ablation arms' numerical checks (prep ran Reference and Optimized).
+    numchecks = {
+        4: [("numcheck_dflash2_single_stage_d1", "numcheck/dflash2_single_stage_d1.json", [])],
+        5: [(f"numcheck_dfly_{stage}_compaction", f"numcheck/dfly_{stage}_compaction.json", [])
+            for stage in ("stage1", "stage2")],
+    }
     probes = {
-        4: [("probe_dflash2_opt_chunk%d" % c, "probe/dflash2_opt_chunk%d.json" % c, []) for c in (256, 512, 1024)],
-        5: [(f"probe_dflash2_single_stage_{a}_mb{mb}", f"probe/dflash2_single_stage_{a}_mb{mb}.json", [])
-            for a in ("ref", "opt") for mb in (4, 8)],
+        4: numchecks[4] + [(f"probe_dflash2_opt_chunk{c}", f"probe/dflash2_opt_chunk{c}.json", [])
+                           for c in (256, 512, 1024)],
+        5: numchecks[5] + [(f"probe_dflash2_single_stage_{a}_mb{mb}", f"probe/dflash2_single_stage_{a}_mb{mb}.json", [])
+                           for a in ("ref", "opt") for mb in (4, 8)],
         6: [(f"probe_dfly_stage1_{a}_mb{mb}", f"probe/dfly_stage1_{a}_mb{mb}.json", []) for a in ("ref", "opt")
             for mb in (4, 8)],
         7: [(f"probe_dfly_stage2_{a}_mb{mb}", f"probe/dfly_stage2_{a}_mb{mb}.json", []) for a in ("ref", "opt")
