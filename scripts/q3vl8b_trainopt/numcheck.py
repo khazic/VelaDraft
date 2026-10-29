@@ -46,6 +46,11 @@ def main() -> None:
             ref_row = first_row(runs["ref"])
             ref_master = masters(runs["ref"])
             for arm in ARMS[method][1:]:
+                if not (runs[arm] / "train" / "ckpt_last.pt").exists():
+                    report["checks"].append({"method": method, "stage": stage, "arm": arm, "passed": None,
+                                             "status": "not_run"})
+                    print(f"{method} {stage} {arm}: not run yet")
+                    continue
                 row = first_row(runs[arm])
                 master = masters(runs[arm])
                 loss_keys = sorted(
@@ -80,6 +85,7 @@ def main() -> None:
                 print(f"{method} {stage} {arm}: passed={passed} loss {ref_row['loss']:.6f} vs {row['loss']:.6f} "
                       f"update gap median {report['checks'][-1]['update_gap_over_update']['median']:.2e}")
     report["passed"] = ok_all
+    report["complete"] = all(check.get("status") != "not_run" for check in report["checks"])
     out = camp / "checks"
     out.mkdir(exist_ok=True)
     (out / "numerical_check.json").write_text(json.dumps(report, indent=1))
