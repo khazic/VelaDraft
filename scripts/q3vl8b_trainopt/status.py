@@ -48,8 +48,9 @@ def render(camp: Path) -> str:
                     if line.strip() and json.loads(line)["split"] == "dev"]
             if devs:
                 dev = f"{devs[-1]['objective_mean']:.4f} ({devs[-1]['step']})"
-        log = (run / "stdout.log").read_text(errors="replace")[-4000:] if (run / "stdout.log").exists() else ""
-        state = "done" if "EXIT_CODE=0" in log else ("failed" if "EXIT_CODE=" in log else "running")
+        log = (run / "stdout.log").read_text(errors="replace") if (run / "stdout.log").exists() else ""
+        attempt = log[log.rfind("] START ") :]  # only the latest attempt counts
+        state = "done" if "EXIT_CODE=0" in attempt else ("failed" if "EXIT_CODE=" in attempt else "running")
         out.append(f"| {run.name} | {step:,} | {step // 25000 + (1 if step % 25000 else 0)} | "
                    f"{per_update or 0:.2f} | {eta or 0:.1f} | {dev or '-'} | {state} |")
     out += ["", "## Scheduler", ""]
