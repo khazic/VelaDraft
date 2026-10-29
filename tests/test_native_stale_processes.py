@@ -121,3 +121,24 @@ def test_count_ownership_flags_process_left_at_stage_boundary(resources, tmp_pat
     lease.uuids = ['GPU-a']; lease.uuid = 'GPU-a'
     lease.boundary(timeout=0)
     assert lease.rows[-1]['phase'] == 'boundary' and lease.rows[-1]['over_bound'] == ['GPU-a']
+
+
+def test_count_ownership_tolerates_extra_apps_outside_timed_windows(resources, tmp_path, monkeypatch):
+    monkeypatch.setenv('VELADRAFT_GPU_OWNERSHIP', 'count')
+    monkeypatch.setenv('VELADRAFT_GPU_MAX_OWN_APPS', '1')
+    seen = {'GPU-a': ''}
+    monkeypatch.setattr(resources, 'query',
+                        lambda *args: '10' if '--query-gpu=memory.used' in args else seen[args[1]])
+    lease = resources.GPULease(0, tmp_path/'gpu.jsonl')
+    lease.uuids = ['GPU-a']; lease.uuid = 'GPU-a'
+    lease.sample('start')
+    seen['GPU-a'] = '1\n2'
+    loading = lease.sample('sample')
+    seen['GPU-a'] = '1'
+    timed = lease.sample('sample')
+    seen['GPU-a'] = ''
+    lease.sample('end')
+    window = [(timed['began_wall_ns'], timed['ended_wall_ns'])]
+    assert lease.validate(timed_windows=window)['extra_app_samples_outside_timed'] == 1
+    with pytest.raises(ValueError, match='count ownership'):
+        lease.validate(timed_windows=[(loading['began_wall_ns'], loading['ended_wall_ns'])])

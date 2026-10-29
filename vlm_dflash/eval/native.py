@@ -301,8 +301,10 @@ def run(args):
                     completed=subprocess.run(command,env=env,cwd=repo,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
                 if completed.returncode:raise ValueError('Native stage failed: '+stage+'; preserved raw/logs')
                 if hasattr(lease,'boundary'):lease.boundary()
-        resources=lease.validate();verify_plan(plan)
         reference=json.loads((evidence/'reference.json').read_text());reports=[json.loads((evidence/(s+'.json')).read_text()) for s in stage_order(args.repeats)]
+        windows=[(min(r['began_wall_ns'] for r in rows),max(r['ended_wall_ns'] for r in rows))
+                 for rows in ([r for r in report['rows'] if r.get('phase')=='timed'] for report in reports) if rows]
+        resources=lease.validate(timed_windows=windows);verify_plan(plan)
         if reference['status']!='complete':raise ValueError('Canonical creator failed')
         for report in (reference,*reports):
             for row in report['rows']:

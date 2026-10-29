@@ -148,10 +148,20 @@ class GPULease:
             if time.monotonic()>deadline:break
             time.sleep(2)
         self.sample('boundary')
-    def validate(self):
+    def validate(self,timed_windows=None):
+        """timed_windows: [(began_wall_ns, ended_wall_ns)] of the timed phases. In count mode
+        extra apps inside a window invalidate the result; outside (startup, compile, warmup,
+        stage boundaries) they are counted and reported, e.g. a site utilisation floor
+        that starts while an engine loads."""
         if self.watcher_error is not None:raise ValueError('GPU resource watcher failed: '+self.watcher_error)
-        if getattr(self,'mode','pid')=='count' and any(row.get('over_bound') for row in self.rows if row['phase']!='boundary_wait'):
-            raise ValueError('GPU carried unexpected compute apps (count ownership mode); whole result invalid')
+        outside=0
+        if getattr(self,'mode','pid')=='count':
+            flagged=[row for row in self.rows if row.get('over_bound') and row['phase']!='boundary_wait']
+            def inside(row):
+                return timed_windows is None or any(row['began_wall_ns']<=end and row['ended_wall_ns']>=begin for begin,end in timed_windows)
+            if any(inside(row) for row in flagged):
+                raise ValueError('GPU carried unexpected compute apps (count ownership mode); whole result invalid')
+            outside=len(flagged)
         if not self.rows or self.rows[0]['phase']!='start' or self.rows[-1]['phase']!='end':raise ValueError('GPU resource coverage incomplete')
         if any(row.get('foreign_pids') or row.get('error') for row in self.rows):raise ValueError('GPU resource evidence contaminated; whole result invalid')
         memory=[row['per_gpu_memory_mib'] for row in self.rows if 'per_gpu_memory_mib' in row]
@@ -159,4 +169,5 @@ class GPULease:
         return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,gpu_uuids=getattr(self,'uuids',None) or [self.uuid],
                     peak_memory_used_mib=peak,
                     ownership_mode=getattr(self,'mode','pid'),max_own_apps_per_gpu=getattr(self,'max_own_apps',None),
+                    extra_app_samples_outside_timed=outside,
                     began_wall_ns=self.rows[0]['began_wall_ns'],ended_wall_ns=self.rows[-1]['ended_wall_ns'])
