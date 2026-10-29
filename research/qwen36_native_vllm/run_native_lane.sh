@@ -1,0 +1,60 @@
+#!/bin/bash
+# One native-eval lane (TP=2 by default) for one Qwen3.6 method on this node.
+#   run_native_lane.sh <method> <gpus e.g. 0,1> <source jsonl> <num_prompts> <repeats> <run name>
+# Frozen settings live in this file; the evidence directory is node-local (/dev/shm,
+# per-stage compile caches are many small files) and is archived to cephfs at the end
+# without the caches.
+set -euo pipefail
+METHOD=$1 GPUS=$2 SOURCE=$3 NUM=$4 REPEATS=$5 NAME=$6
+
+L=/llm-align/liuchonghan
+REPO=$L/VelaDraft-q36eval
+PY=$L/envs/veladraft_native022/bin/python
+TASK=$L/runs/veladraft/qwen36_native_eval
+SHM=/dev/shm/liuchonghan_q36eval
+TARGET=$L/models/Qwen3.6-35B-A3B
+IMAGES=$L/datasets/MMSpec_repo/dataset/MMSpec/test/images
+DRAFT=$TASK/exports/$METHOD
+MANIFEST=$TASK/exports/${METHOD}_runtime.json
+OUT=$SHM/runs/$NAME/result.json
+ARCHIVE=$TASK/runs/$NAME
+
+# Frozen protocol knobs (see FROZEN_CONFIG.md).
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-1024}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+GPU_MEM=${GPU_MEM:-0.85}
+MIN_PIXELS=65536
+MAX_PIXELS=1048576
+TEMPLATE_KWARGS='{"enable_thinking": false}'
+
+mkdir -p "$SHM/runs" "$SHM/gpu_locks" "$SHM/triton" "$SHM/xdg" "$TASK/logs"
+export PYTHONPATH=$REPO
+export HF_HOME=$L/hf_cache HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export TRITON_CACHE_DIR=$SHM/triton XDG_CACHE_HOME=$SHM/xdg
+export QWEN8B_DIGEST_CACHE=$SHM/digests.sqlite
+export VELADRAFT_GPU_LOCK_DIR=$SHM/gpu_locks
+export VELADRAFT_GPU_OWNERSHIP=count VELADRAFT_GPU_MAX_OWN_APPS=${VELADRAFT_GPU_MAX_OWN_APPS:-2}
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+
+ARGS=(--target "$TARGET" --draft "$DRAFT" --source "$SOURCE" --images-dir "$IMAGES"
+      --method "$METHOD" --gpus "$GPUS" --num-prompts "$NUM" --repeats "$REPEATS"
+      --max-new-tokens "$MAX_NEW_TOKENS" --max-model-len "$MAX_MODEL_LEN"
+      --speculative-tokens 7 --gpu-memory-utilization "$GPU_MEM"
+      --min-pixels $MIN_PIXELS --max-pixels $MAX_PIXELS
+      --chat-template-kwargs "$TEMPLATE_KWARGS" --out "$OUT")
+ARGS+=(--runtime-manifest "$MANIFEST")
+
+echo "[lane] $(date '+%F %T') $(hostname -I | cut -d' ' -f1) method=$METHOD gpus=$GPUS source=$SOURCE n=$NUM repeats=$REPEATS out=$OUT"
+cd "$REPO"
+set +e
+"$PY" -m vlm_dflash.cli native-eval "${ARGS[@]}"
+RC=$?
+set -e
+mkdir -p "$ARCHIVE"
+cp "$OUT" "$ARCHIVE/" 2>/dev/null || true
+EV=${OUT%.json}.evidence
+if [ -d "$EV" ]; then
+  tar -C "$(dirname "$EV")" --exclude='*/cache' --exclude='*/inductor' -czf "$ARCHIVE/evidence.tar.gz" "$(basename "$EV")"
+fi
+echo "LANE_EXIT=$RC $(date '+%F %T')"
+exit $RC
