@@ -22,6 +22,10 @@ METHODS = {
              "Qwen3.6-35B-A3B trained DFly (400K, 75000 updates, upstream two-stage recipe): FC base + "
              "per-layer fusion residual context, sequential greedy hidden correction with real previous tokens, "
              "spatial MRoPE, official vLLM linear verifier"),
+    "dflare": ("bootstrap_dflare.py", ["dflare_adapter.py"],
+               "Qwen3.6-35B-A3B trained DFlare (400K, 75000 updates): per-layer softmax fusion of target "
+               "layers [1,19,37] with dedicated context K/V projections (no FC), spatial MRoPE, stock greedy "
+               "head, official vLLM linear verifier"),
 }
 
 

@@ -29,6 +29,7 @@ DFLASH_ARCHITECTURE = "DFlashDraftModel"
 METHODS = {
     "dflash": ("dflash", 36, DFLASH_ARCHITECTURE, ()),
     "dfly": ("dfly", 42, "DFlyQwen36ForCausalLM", ("qwen36_dfly_v1",)),
+    "dflare": ("dflare", 42, "DFlareQwen36ForCausalLM", ("qwen36_dflare_v1",)),
 }
 
 
