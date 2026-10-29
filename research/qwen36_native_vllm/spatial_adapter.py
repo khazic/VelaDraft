@@ -330,6 +330,10 @@ def install() -> dict[str, str]:
         return result
 
     def initialize_keys(self, cudagraph_mode):
+        if enabled(self.draft_model_config.hf_config) and os.environ.get("Q36_DRAFT_CUDAGRAPH") == "PIECEWISE":
+            # Target keeps the engine's graph mode; the draft dispatches PIECEWISE only.
+            from vllm.config import CUDAGraphMode
+            cudagraph_mode = CUDAGraphMode.PIECEWISE
         original_initialize_keys(self, cudagraph_mode)
         if enabled(self.draft_model_config.hf_config):
             mode, descriptor = self.cudagraph_dispatcher.dispatch(contract.BLOCK_SIZE)
