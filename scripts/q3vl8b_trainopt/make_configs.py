@@ -192,14 +192,16 @@ def main() -> None:
                     )
         # Numerical check: one real update from the same state, every arm (section 10).
         for stage, start in stages.items():
-            for arm in ARMS[method]:
+            # ``ref_repeat`` reruns Reference: the run-to-run noise floor of one bf16 update.
+            for arm in [*ARMS[method], "ref_repeat"]:
                 overrides = {"stop_at_step": start + 1, "save_every_steps": 0,
                              "fork_state": str(init_state(args.work, method))}
                 if start:
                     overrides["fork_step_override"] = start
                 write(
                     f"numcheck/{method}_{stage}_{arm}.json",
-                    build(base, method, arm, name=f"numcheck_{method}_{stage}_{arm}", purpose="numcheck", **overrides),
+                    build(base, method, "ref" if arm == "ref_repeat" else arm, name=f"numcheck_{method}_{stage}_{arm}",
+                          purpose="numcheck", **overrides),
                 )
         # Early probes from the initial state (no snapshot needed): D2 chunk memory
         # pilot and micro-batch capacity per arm and stage.

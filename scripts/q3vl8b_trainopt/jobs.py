@@ -90,9 +90,10 @@ def main_phase(camp: Path) -> list[dict]:
         job["pin"] = [gpu]
     # The intermediate ablation arms' numerical checks (prep ran Reference and Optimized).
     numchecks = {
-        4: [("numcheck_dflash2_single_stage_d1", "numcheck/dflash2_single_stage_d1.json", [])],
-        5: [(f"numcheck_dfly_{stage}_compaction", f"numcheck/dfly_{stage}_compaction.json", [])
-            for stage in ("stage1", "stage2")],
+        4: [(f"numcheck_dflash2_single_stage_{arm}", f"numcheck/dflash2_single_stage_{arm}.json", [])
+            for arm in ("d1", "ref_repeat")],
+        5: [(f"numcheck_dfly_{stage}_{arm}", f"numcheck/dfly_{stage}_{arm}.json", [])
+            for stage in ("stage1", "stage2") for arm in ("compaction", "ref_repeat")],
     }
     probes = {
         4: numchecks[4] + [(f"probe_dflash2_opt_chunk{c}", f"probe/dflash2_opt_chunk{c}.json", [])
