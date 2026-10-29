@@ -26,6 +26,10 @@ METHODS = {
                "Qwen3.6-35B-A3B trained DFlare (400K, 75000 updates): per-layer softmax fusion of target "
                "layers [1,19,37] with dedicated context K/V projections (no FC), spatial MRoPE, stock greedy "
                "head, official vLLM linear verifier"),
+    "jetspec": ("bootstrap_jetspec.py", ["jetspec_adapter.py"],
+                "Qwen3.6-35B-A3B trained JetSpec (400K, 75000 updates): local shared-block integrated single-path "
+                "reference with block-causal draft queries (not the upstream parallel-tree runtime), spatial MRoPE, "
+                "official vLLM linear verifier"),
 }
 
 

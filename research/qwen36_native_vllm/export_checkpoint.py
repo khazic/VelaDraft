@@ -30,6 +30,7 @@ METHODS = {
     "dflash": ("dflash", 36, DFLASH_ARCHITECTURE, ()),
     "dfly": ("dfly", 42, "DFlyQwen36ForCausalLM", ("qwen36_dfly_v1",)),
     "dflare": ("dflare", 42, "DFlareQwen36ForCausalLM", ("qwen36_dflare_v1",)),
+    "jetspec": ("jetspec", 36, DFLASH_ARCHITECTURE, ("qwen36_jetspec_local_block_v1",)),
 }
 
 
@@ -78,7 +79,7 @@ def export(method: str, checkpoint: Path, output: Path) -> dict:
     if any("embed_tokens" in name or "lm_head" in name for name in weights):
         raise ValueError("Checkpoint unexpectedly includes embedding/head weights")
     config, changes = native_config(payload["draft_config"], method)
-    if method == "dflash":
+    if config["architectures"] == [DFLASH_ARCHITECTURE]:
         from vllm.model_executor.models import ModelRegistry
         if any(arch not in ModelRegistry.get_supported_archs() for arch in config["architectures"]):
             raise ValueError(f"{config['architectures']} absent from the installed vLLM registry")
