@@ -30,6 +30,19 @@ METHODS = {
                 "Qwen3.6-35B-A3B trained JetSpec (400K, 75000 updates): local shared-block integrated single-path "
                 "reference with block-causal draft queries (not the upstream parallel-tree runtime), spatial MRoPE, "
                 "official vLLM linear verifier"),
+    "dflash2": ("bootstrap_dflash2.py", ["dflash2_adapter.py"],
+                "Qwen3.6-35B-A3B trained DFlash2 (400K, 75000 updates): block-local grouped dynamic convolutions "
+                "around attention and MLP, top-16 unary candidates reranked by the trained bilinear selector with "
+                "sequential real predecessors, spatial MRoPE, official vLLM linear verifier"),
+    "dspark": ("bootstrap_heads.py", ["head_adapters.py"],
+               "Qwen3.6-35B-A3B trained DSpark (400K, 75000 updates, upstream_dspark recipe): fixed-block S7 "
+               "integrated scope, anchor-slot drafting with the vanilla Markov logit bias chained on real previous "
+               "tokens; confidence head loaded but unused by fixed-length drafting; spatial MRoPE, official vLLM "
+               "linear verifier"),
+    "domino": ("bootstrap_heads.py", ["head_adapters.py"],
+               "Qwen3.6-35B-A3B trained Domino (400K, 75000 updates): anchor-slot drafting, prefix GRU over real "
+               "previous-token embeddings with the trained correction head from slot 1, spatial MRoPE, official "
+               "vLLM linear verifier"),
 }
 
 
