@@ -56,7 +56,9 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--block-size", type=int, default=16)
     parser.add_argument("--system-prompt")
-    parser.add_argument("--graph", choices=["piecewise8", "default"], default="piecewise8")
+    parser.add_argument("--graph", choices=["piecewise8", "default", "full_decode_only", "piecewise1_8"],
+                        default="piecewise8")
+    parser.add_argument("--disable-custom-all-reduce", action="store_true")
     parser.add_argument("--ar", action="store_true", help="no speculative config (AR timing baseline)")
     parser.add_argument("--repeat", type=int, default=2, help="passes over the sessions; the first is warmup")
     args = parser.parse_args()
@@ -70,14 +72,23 @@ def main():
                   generation_config="vllm", disable_log_stats=False,
                   mm_processor_kwargs=dict(min_pixels=65536, max_pixels=1048576),
                   worker_extension_cls="diag_acceptance.Q36Diag")
+    if args.disable_custom_all_reduce:
+        kwargs["disable_custom_all_reduce"] = True
+    graphs = {"piecewise8": dict(mode=3, cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[8],
+                                 max_cudagraph_capture_size=8),
+              "piecewise1_8": dict(mode=3, cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[1, 8],
+                                   max_cudagraph_capture_size=8),
+              "full_decode_only": dict(mode=3, cudagraph_mode="FULL_AND_PIECEWISE", cudagraph_capture_sizes=[1, 8],
+                                       max_cudagraph_capture_size=8)}
+    if args.ar and args.graph != "default":
+        kwargs["compilation_config"] = graphs[args.graph]
     if not args.ar:
         kwargs.update(attention_config={"backend": "FLASH_ATTN"},
                       speculative_config=dict(model=args.draft, method="dflash", num_speculative_tokens=7,
                                               draft_tensor_parallel_size=tp, attention_backend="FLASH_ATTN",
                                               use_local_argmax_reduction=False))
-        if args.graph == "piecewise8":
-            kwargs["compilation_config"] = dict(mode=3, cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[8],
-                                                max_cudagraph_capture_size=8)
+        if args.graph != "default":
+            kwargs["compilation_config"] = graphs[args.graph]
         if args.block_size:
             kwargs["block_size"] = args.block_size
     llm = LLM(**kwargs)
