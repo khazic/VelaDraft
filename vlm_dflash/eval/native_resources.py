@@ -68,9 +68,10 @@ class GPULease:
         self.indices=[index] if isinstance(index,int) else list(index)
         self.index=self.indices[0];self.path=Path(path);self.rows=[];self.stop=threading.Event();self.locks=[];self.recent_own_gpu_pids={};self.proc_complete=process_visibility_complete();self.watcher_error=None
     def sample(self,phase):
-        row={'phase':phase,'began_wall_ns':time.time_ns(),'gpu_uuid':self.uuid,'gpu_uuids':self.uuids}
+        uuids=getattr(self,'uuids',None) or [self.uuid]
+        row={'phase':phase,'began_wall_ns':time.time_ns(),'gpu_uuid':self.uuid,'gpu_uuids':uuids}
         try:
-            pids={int(v) for uuid in self.uuids for v in query('-i',uuid,'--query-compute-apps=pid').splitlines() if v.strip()}
+            pids={int(v) for uuid in uuids for v in query('-i',uuid,'--query-compute-apps=pid').splitlines() if v.strip()}
             live=descendants();now=time.monotonic()
             for pid in pids & live:self.recent_own_gpu_pids[pid]=now
             recent={pid for pid,seen in self.recent_own_gpu_pids.items() if now-seen<=10}
@@ -84,7 +85,7 @@ class GPULease:
     def __enter__(self):
         self.uuids=[normalize_uuid(query('-i',str(i),'--query-gpu=uuid')) for i in self.indices]
         self.uuid=self.uuids[0]
-        root=Path('/tmp/veladraft_gpu_locks');root.mkdir(exist_ok=True)
+        root=Path(os.environ.get('VELADRAFT_GPU_LOCK_DIR','/tmp/veladraft_gpu_locks'));root.mkdir(parents=True,exist_ok=True)
         try:
             for uuid in self.uuids:
                 lock=(root/(uuid+'.lock')).open('a');self.locks.append(lock)

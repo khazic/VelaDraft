@@ -231,7 +231,8 @@ def make_plan(args):
 
 
 def resolve_gpus(args):
-    gpus=[int(v) for v in args.gpus.split(',')] if args.gpus else [args.gpu]
+    value=getattr(args,'gpus',None)
+    gpus=[int(v) for v in value.split(',')] if value else [args.gpu]
     if len(set(gpus))!=len(gpus) or any(g<0 for g in gpus):raise ValueError('GPU indices must be distinct and non-negative')
     if len(gpus) not in (1,2,4,8):raise ValueError('Tensor parallel size must be 1, 2, 4 or 8')
     return gpus
@@ -277,7 +278,8 @@ def run(args):
         with GPULease(resolve_gpus(args),evidence/'resources.jsonl') as lease:
             plan=make_plan(args)
             verify_preservation(plan)
-            plan['gpu_uuid']=lease.uuid;plan['gpu_uuids']=lease.uuids;save(evidence/'plan.json',plan)
+            uuids=getattr(lease,'uuids',None) or [lease.uuid]
+            plan['gpu_uuid']=lease.uuid;plan['gpu_uuids']=uuids;save(evidence/'plan.json',plan)
             plan_path=evidence/'plan.json';plan_sha=digest(plan_path)
             for stage in ('reference',*stage_order(args.repeats)):
                 env=dict(os.environ,CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=','.join(map(str,plan['gpus'])),
@@ -308,7 +310,7 @@ def run(args):
                 if field=='numeric_parent':
                     if actual!=expected:raise ValueError('Numerical parent configuration differs from native AR')
                 elif actual['numeric']!=expected['numeric']:raise ValueError('Worker numerical flags differ from native AR')
-            if report['gpu_uuids']!=lease.uuids:raise ValueError('Actual CUDA GPUs differ from resource lease')
+            if report.get('gpu_uuids',[report.get('gpu_uuid')])!=uuids:raise ValueError('Actual CUDA GPUs differ from resource lease')
         result=summarize(plan,reference['rows'],reports);result.update(evidence=str(evidence),resource_evidence=resources,
             scope='steady-state batch1 image/RGB/template/prefill/decode/output E2E; startup and full warmup excluded',
             method=args.method,implementation_scope=(plan.get('adapter') or {}).get('scope','prepared stock DFlash'),

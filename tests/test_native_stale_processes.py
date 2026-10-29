@@ -81,11 +81,11 @@ def test_lease_lock_released_even_if_watcher_join_interrupted(resources, tmp_pat
             raise KeyboardInterrupt('interrupted while joining watcher')
     lock_path = tmp_path/'lease.lock'
     lease = resources.GPULease(0, tmp_path/'gpu.jsonl')
-    lease.lock = lock_path.open('a')
-    resources.fcntl.flock(lease.lock, resources.fcntl.LOCK_EX | resources.fcntl.LOCK_NB)
+    lease.locks = [lock_path.open('a')]
+    resources.fcntl.flock(lease.locks[0], resources.fcntl.LOCK_EX | resources.fcntl.LOCK_NB)
     lease.thread = InterruptedThread()
     with pytest.raises(KeyboardInterrupt):
         lease.__exit__(None, None, None)
-    assert lease.lock.closed
+    assert lease.locks[0].closed
     with lock_path.open('a') as other:
         resources.fcntl.flock(other, resources.fcntl.LOCK_EX | resources.fcntl.LOCK_NB)

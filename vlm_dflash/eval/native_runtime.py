@@ -149,7 +149,7 @@ def main():
         llm=LLM(**copy.deepcopy(kwargs));torch.cuda.synchronize();report['GPU_executed']=True
         report['gpu_uuids']=[normalize_uuid(torch.cuda.get_device_properties(i).uuid) for i in range(plan.get('tensor_parallel_size',1))]
         report['gpu_uuid']=report['gpu_uuids'][0]
-        if report['gpu_uuids']!=plan['gpu_uuids']:raise ValueError('Actual CUDA devices differ from locked GPUs')
+        if report['gpu_uuids']!=plan.get('gpu_uuids',[plan['gpu_uuid']]):raise ValueError('Actual CUDA devices differ from locked GPUs')
         report['worker_before']=worker_metadata(llm,arm,plan)
         params=SamplingParams(temperature=0,max_tokens=plan['max_new_tokens'],seed=plan['seed'],
                               stop_token_ids=plan['stop_token_ids'],ignore_eos=False)
