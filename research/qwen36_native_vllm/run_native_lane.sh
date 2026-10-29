@@ -46,6 +46,29 @@ ARGS=(--target "$TARGET" --draft "$DRAFT" --source "$SOURCE" --images-dir "$IMAG
 ARGS+=(--runtime-manifest "$MANIFEST")
 
 echo "[lane] $(date '+%F %T') $(hostname -I | cut -d' ' -f1) method=$METHOD gpus=$GPUS source=$SOURCE n=$NUM repeats=$REPEATS out=$OUT"
+
+# Clear this lane's cards of site placeholders (keep_gpu_busy occupiers and utilisation
+# floors) before the lease; the protocol itself never stops a foreign process and
+# refuses a busy card. The site guard may floor a card again while an engine loads;
+# that is recorded, and only extra apps inside timed windows invalidate a run.
+for g in ${GPUS//,/ }; do
+  for pg in $(ps -eo pgid,args | awk -v g="$g" '$2=="bash" && $3 ~ /keep_gpu_busy\.sh$/ && $4==g {print $1}' | sort -u); do
+    kill -TERM -- "-$pg" 2>/dev/null
+  done
+  for pid in $(ps -eo pid,args | awk -v g="$g" '$2 ~ /python3?$/ && $3 ~ /gpu_floor\.py$/ && $4=="--gpu" && $5==g {print $1}'); do
+    kill -TERM "$pid" 2>/dev/null
+  done
+done
+for _ in $(seq 60); do
+  busy=0
+  for g in ${GPUS//,/ }; do
+    used=$(nvidia-smi -i "$g" --query-gpu=memory.used --format=csv,noheader,nounits)
+    apps=$(nvidia-smi -i "$g" --query-compute-apps=pid --format=csv,noheader)
+    { [ "$used" -ge 500 ] || [ -n "$apps" ]; } && busy=1
+  done
+  [ $busy -eq 0 ] && break
+  sleep 2
+done
 cd "$REPO"
 set +e
 "$PY" -m vlm_dflash.cli native-eval "${ARGS[@]}"
