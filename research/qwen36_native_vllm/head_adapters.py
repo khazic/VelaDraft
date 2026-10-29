@@ -31,8 +31,8 @@ HIDDEN = contract.DRAFT_FIELDS["hidden_size"]
 VOCAB = contract.DRAFT_FIELDS["vocab_size"]
 METHODS = {
     # name -> (architecture, marker, trained tensor count, extra tensor prefixes)
-    "dspark": ("DSparkQwen36ForCausalLM", "qwen36_dspark_v1", 40, ("markov_head.", "confidence_head.")),
-    "domino": ("DominoQwen36ForCausalLM", "qwen36_domino_v1", 40, ("prefix_gru.", "embed_proj.")),
+    "dspark": ("DFlashDSparkQwen36ForCausalLM", "qwen36_dspark_v1", 40, ("markov_head.", "confidence_head.")),
+    "domino": ("DFlashDominoQwen36ForCausalLM", "qwen36_domino_v1", 40, ("prefix_gru.", "embed_proj.")),
 }
 _INSTALLED = False
 

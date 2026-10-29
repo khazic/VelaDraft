@@ -22,7 +22,7 @@ import torch.nn.functional as F
 import contract
 import spatial_adapter as spatial
 
-ARCH = "DFlyQwen36ForCausalLM"
+ARCH = "DFlashDFlyQwen36ForCausalLM"
 MARKER = "qwen36_dfly_v1"
 TENSOR_COUNT = 42
 HIDDEN = contract.DRAFT_FIELDS["hidden_size"]
@@ -166,7 +166,7 @@ def _build_classes():
                 attn = layer.self_attn.attn
                 attn.impl.do_kv_cache_update(attn, all_k[i], all_v[i], attn.kv_cache, context_slot_mapping)
 
-    class DFlyQwen36ForCausalLM(official.DFlashQwen3ForCausalLM):
+    class DFlashDFlyQwen36ForCausalLM(official.DFlashQwen3ForCausalLM):
         def __init__(self, *, vllm_config, prefix=""):
             nn.Module.__init__(self)
             self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -207,7 +207,7 @@ def _build_classes():
             self.model.load_weights(state.items())
             self.loaded_tensor_names = tuple(sorted(state))
 
-    return DFlyQwen36ForCausalLM
+    return DFlashDFlyQwen36ForCausalLM
 
 
 def sequential_greedy(model, suffix_hidden: torch.Tensor, bonus: torch.Tensor) -> torch.Tensor:
@@ -233,7 +233,7 @@ def install():
     from vllm.v1.spec_decode.dflash import DFlashProposer
     import sys
     module = sys.modules[__name__]
-    module.DFlyQwen36ForCausalLM = _build_classes()
+    module.DFlashDFlyQwen36ForCausalLM = _build_classes()
     if ARCH not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model(ARCH, f"{__name__}:{ARCH}")
     original_set = DFlashProposer.set_inputs_first_pass

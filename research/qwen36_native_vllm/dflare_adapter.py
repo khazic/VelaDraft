@@ -23,7 +23,7 @@ import torch.nn.functional as F
 import contract
 import spatial_adapter as spatial
 
-ARCH = "DFlareQwen36ForCausalLM"
+ARCH = "DFlashDFlareQwen36ForCausalLM"
 MARKER = "qwen36_dflare_v1"
 TENSOR_COUNT = 42
 HIDDEN = contract.DRAFT_FIELDS["hidden_size"]
@@ -151,7 +151,7 @@ def _build_classes():
                 attn = layer.self_attn.attn
                 attn.impl.do_kv_cache_update(attn, all_k[i], all_v[i], attn.kv_cache, context_slot_mapping)
 
-    class DFlareQwen36ForCausalLM(official.DFlashQwen3ForCausalLM):
+    class DFlashDFlareQwen36ForCausalLM(official.DFlashQwen3ForCausalLM):
         def __init__(self, *, vllm_config, prefix=""):
             nn.Module.__init__(self)
             self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -191,7 +191,7 @@ def _build_classes():
             self.model.load_weights(state.items())
             self.loaded_tensor_names = tuple(sorted(state))
 
-    return DFlareQwen36ForCausalLM
+    return DFlashDFlareQwen36ForCausalLM
 
 
 def install():
@@ -202,7 +202,7 @@ def install():
     from vllm.model_executor.models import ModelRegistry
     from vllm.v1.spec_decode.dflash import DFlashProposer
     import sys
-    sys.modules[__name__].DFlareQwen36ForCausalLM = _build_classes()
+    sys.modules[__name__].DFlashDFlareQwen36ForCausalLM = _build_classes()
     if ARCH not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model(ARCH, f"{__name__}:{ARCH}")
     original_load = DFlashProposer.load_model

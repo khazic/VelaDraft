@@ -28,12 +28,12 @@ DFLASH_ARCHITECTURE = "DFlashDraftModel"
 # method -> (training algorithm field, trained tensor count, vLLM architecture, method markers)
 METHODS = {
     "dflash": ("dflash", 36, DFLASH_ARCHITECTURE, ()),
-    "dfly": ("dfly", 42, "DFlyQwen36ForCausalLM", ("qwen36_dfly_v1",)),
-    "dflare": ("dflare", 42, "DFlareQwen36ForCausalLM", ("qwen36_dflare_v1",)),
+    "dfly": ("dfly", 42, "DFlashDFlyQwen36ForCausalLM", ("qwen36_dfly_v1",)),
+    "dflare": ("dflare", 42, "DFlashDFlareQwen36ForCausalLM", ("qwen36_dflare_v1",)),
     "jetspec": ("jetspec", 36, DFLASH_ARCHITECTURE, ("qwen36_jetspec_local_block_v1",)),
     "dflash2": ("dflash2", 51, "DFlash2Qwen36ForCausalLM", ("qwen36_dflash2_v1",)),
-    "dspark": ("dspark", 40, "DSparkQwen36ForCausalLM", ("qwen36_dspark_v1",)),
-    "domino": ("domino", 40, "DominoQwen36ForCausalLM", ("qwen36_domino_v1",)),
+    "dspark": ("dspark", 40, "DFlashDSparkQwen36ForCausalLM", ("qwen36_dspark_v1",)),
+    "domino": ("domino", 40, "DFlashDominoQwen36ForCausalLM", ("qwen36_domino_v1",)),
 }
 
 
