@@ -25,9 +25,10 @@ import contract
 
 FINAL_STEP = 75000
 DFLASH_ARCHITECTURE = "DFlashDraftModel"
-# method -> (training algorithm field, expected trained tensor count)
+# method -> (training algorithm field, trained tensor count, vLLM architecture, method markers)
 METHODS = {
-    "dflash": ("dflash", 36),
+    "dflash": ("dflash", 36, DFLASH_ARCHITECTURE, ()),
+    "dfly": ("dfly", 42, "DFlyQwen36ForCausalLM", ("qwen36_dfly_v1",)),
 }
 
 
@@ -46,18 +47,20 @@ def tensor_sha256(tensor: torch.Tensor) -> str:
 def native_config(config: dict, method: str) -> tuple[dict, list[str]]:
     """Dispatch-only config edits; trained hyperparameters stay untouched."""
     contract.validate_draft_config(config, require_marker=False)
+    _, _, architecture, markers = METHODS[method]
     config = json.loads(json.dumps(config))
-    config["architectures"] = [DFLASH_ARCHITECTURE]
-    config["dflash_config"][contract.MARKER] = True
+    config["architectures"] = [architecture]
+    for marker in (contract.MARKER, *markers):
+        config["dflash_config"][marker] = True
     config["rope_parameters"]["mrope_section"] = list(contract.MROPE_SECTION)
     config["rope_parameters"]["mrope_interleaved"] = True
     contract.validate_draft_config(config)
-    return config, ["architectures", "dflash_config." + contract.MARKER,
+    return config, ["architectures", *("dflash_config." + m for m in (contract.MARKER, *markers)),
                     "rope_parameters.mrope_section", "rope_parameters.mrope_interleaved"]
 
 
 def export(method: str, checkpoint: Path, output: Path) -> dict:
-    algorithm, tensor_count = METHODS[method]
+    algorithm, tensor_count, _, _ = METHODS[method]
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Export destination must be empty: {output}")
     checkpoint_hash = sha256_file(checkpoint)
@@ -74,9 +77,10 @@ def export(method: str, checkpoint: Path, output: Path) -> dict:
     if any("embed_tokens" in name or "lm_head" in name for name in weights):
         raise ValueError("Checkpoint unexpectedly includes embedding/head weights")
     config, changes = native_config(payload["draft_config"], method)
-    from vllm.model_executor.models import ModelRegistry
-    if any(arch not in ModelRegistry.get_supported_archs() for arch in config["architectures"]):
-        raise ValueError(f"{config['architectures']} absent from the installed vLLM registry")
+    if method == "dflash":
+        from vllm.model_executor.models import ModelRegistry
+        if any(arch not in ModelRegistry.get_supported_archs() for arch in config["architectures"]):
+            raise ValueError(f"{config['architectures']} absent from the installed vLLM registry")
     output.mkdir(parents=True, exist_ok=True)
     (output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     model_file = output / "model.safetensors"

@@ -18,6 +18,10 @@ METHODS = {
     "dflash": ("bootstrap_dflash.py", [],
                "Qwen3.6-35B-A3B trained DFlash (400K, 75000 updates), interleaved partial spatial MRoPE, "
                "target embedding/head shared, official vLLM linear verifier"),
+    "dfly": ("bootstrap_dfly.py", ["dfly_adapter.py"],
+             "Qwen3.6-35B-A3B trained DFly (400K, 75000 updates, upstream two-stage recipe): FC base + "
+             "per-layer fusion residual context, sequential greedy hidden correction with real previous tokens, "
+             "spatial MRoPE, official vLLM linear verifier"),
 }
 
 
