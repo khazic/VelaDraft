@@ -89,3 +89,33 @@ def test_lease_lock_released_even_if_watcher_join_interrupted(resources, tmp_pat
     assert lease.locks[0].closed
     with lock_path.open('a') as other:
         resources.fcntl.flock(other, resources.fcntl.LOCK_EX | resources.fcntl.LOCK_NB)
+
+
+def test_count_ownership_requires_empty_boundaries_and_bounded_apps(resources, tmp_path, monkeypatch):
+    monkeypatch.setenv('VELADRAFT_GPU_OWNERSHIP', 'count')
+    monkeypatch.setenv('VELADRAFT_GPU_MAX_OWN_APPS', '2')
+    seen = {'GPU-a': '', 'GPU-b': ''}
+    monkeypatch.setattr(resources, 'query', lambda *args: seen[args[1]])
+    lease = resources.GPULease([0, 1], tmp_path/'gpu.jsonl')
+    lease.uuids = ['GPU-a', 'GPU-b']; lease.uuid = 'GPU-a'
+    lease.sample('start')
+    seen.update({'GPU-a': '900001\n900002', 'GPU-b': '900003'})
+    lease.sample('sample')
+    seen.update({'GPU-a': '', 'GPU-b': ''})
+    lease.boundary(timeout=0)
+    lease.sample('end')
+    result = lease.validate()
+    assert result['ownership_mode'] == 'count' and result['gpu_uuids'] == ['GPU-a', 'GPU-b']
+    seen.update({'GPU-a': '900001\n900002\n900009'})
+    lease.sample('sample')
+    with pytest.raises(ValueError, match='count ownership'):
+        lease.validate()
+
+
+def test_count_ownership_flags_process_left_at_stage_boundary(resources, tmp_path, monkeypatch):
+    monkeypatch.setenv('VELADRAFT_GPU_OWNERSHIP', 'count')
+    monkeypatch.setattr(resources, 'query', lambda *args: '777')
+    lease = resources.GPULease(0, tmp_path/'gpu.jsonl')
+    lease.uuids = ['GPU-a']; lease.uuid = 'GPU-a'
+    lease.boundary(timeout=0)
+    assert lease.rows[-1]['phase'] == 'boundary' and lease.rows[-1]['over_bound'] == ['GPU-a']

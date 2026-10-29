@@ -294,6 +294,7 @@ def run(args):
                 with (evidence/(stage+'.log')).open('x') as log:
                     completed=subprocess.run(command,env=env,cwd=repo,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
                 if completed.returncode:raise ValueError('Native stage failed: '+stage+'; preserved raw/logs')
+                if hasattr(lease,'boundary'):lease.boundary()
         resources=lease.validate();verify_plan(plan)
         reference=json.loads((evidence/'reference.json').read_text());reports=[json.loads((evidence/(s+'.json')).read_text()) for s in stage_order(args.repeats)]
         if reference['status']!='complete':raise ValueError('Canonical creator failed')
