@@ -52,6 +52,8 @@ def pre_seed_from_init(job: dict, arg: str) -> None:
     train = Path(job["run_dir"]) / "train"
     link(init_train / "init_state.pt", train / "ckpt_last.pt")
     link(init_train / "ckpt_init.pt", train / "ckpt_init.pt")
+    # The exact-resume preflight reads the run's frozen contract (same target, same method).
+    link(Path(arg) / "contract.json", Path(job["run_dir"]) / "contract.json")
     for name in ("visual_path_check.json", "swap_pair.pt"):
         source = Path(arg) / "online" / name
         if source.exists():

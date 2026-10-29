@@ -95,7 +95,9 @@ def formal_tables(raw: Path, ledgers: list[dict], paired: dict) -> tuple[list, l
         instrument = summary.get("instrument") or {}
         vals = read_jsonl(run / "validation.jsonl")
         name = f"{track}_{method}_{seed}_{arm}"
-        gpu_seconds = sum(r["seconds"] for r in ledgers if r.get("event") == "job" and r.get("job") == name)
+        # Retries of a run are separate scheduler jobs (``<name>_attemptN``) on the same run directory.
+        gpu_seconds = sum(r["seconds"] for r in ledgers if r.get("event") == "job"
+                          and re.fullmatch(re.escape(name) + r"(_attempt\d+)?", r.get("job", "")))
         wall = sum(u.get("update_s", 0.0) for u in updates)
         samples = sum(u.get("samples", 0) for u in updates)
         positions = sum(u.get("w_effective_positions", 0) for u in updates)
