@@ -5,9 +5,9 @@
 ``jobs.json`` is a list of ``{name, config, run_dir, gpus, pin, deps, after, wait_files, pre, post,
 extra_args}``.
 A job starts once every dependency finished with exit code 0 and enough GPUs are free
-(two-GPU jobs get an aligned pair). A GPU without a job carries a utilization floor
-(``gpu_floor.py``, ~0.45 GiB, ~45 % duty) so the node never idles; the floor is removed
-before a job takes the GPU. Every job's GPU interval goes to ``gpu_time_ledger.jsonl``
+(two-GPU jobs get an aligned pair). When ``FLOOR_SCRIPT`` is set, a GPU without a job
+carries that site process (``FLOOR_PY FLOOR_SCRIPT --gpu <g> --util 0.45``) until a job on
+it reaches its training loop. Every job's GPU interval goes to ``gpu_time_ledger.jsonl``
 and its state to ``jobs_state.json`` (a restarted scheduler skips finished jobs).
 """
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 # Node paths from the environment (TRAINOPT_ENV, sourced by launch_campaign.sh).
 FLOOR_PY = os.environ.get("FLOOR_PY", "python3")
-FLOOR = os.environ.get("FLOOR_SCRIPT", "gpu_floor.py")
+FLOOR = os.environ.get("FLOOR_SCRIPT", "")
 LOCAL = Path(os.environ.get("VELA_LOCAL", "/tmp/trainopt"))
 HERE = Path(__file__).resolve().parent
 CORES_PER_GPU = 30
@@ -98,10 +98,13 @@ class Scheduler:
 
     def kill_stray_floors(self) -> None:
         """Remove floors a previous scheduler left on this pool's GPUs."""
+        if not FLOOR:
+            return
+        name = Path(FLOOR).name
         out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True).stdout
         for line in out.splitlines()[1:]:
             parts = line.split()
-            if len(parts) >= 5 and parts[2].endswith("gpu_floor.py") and parts[3] == "--gpu" and int(parts[4]) in self.gpus:
+            if len(parts) >= 5 and parts[2].endswith(name) and parts[3] == "--gpu" and int(parts[4]) in self.gpus:
                 os.kill(int(parts[0]), signal.SIGTERM)
 
     def save(self) -> None:
@@ -115,7 +118,7 @@ class Scheduler:
 
     # -- floors ------------------------------------------------------------
     def floor_on(self, gpu: int) -> None:
-        if gpu in self.floors and self.floors[gpu].poll() is None:
+        if not FLOOR or (gpu in self.floors and self.floors[gpu].poll() is None):
             return
         log = open(LOCAL / f"floor_gpu{gpu}.log", "a")
         self.floors[gpu] = subprocess.Popen(
@@ -253,8 +256,7 @@ class Scheduler:
             if not self.running and not any(self.state[job["name"]]["status"] == "pending" for job in self.jobs):
                 break
             time.sleep(10)
-        # Floors stay up on exit so the GPUs never idle between phases; the next
-        # scheduler (or park_node.sh) replaces them.
+        # Floors stay up on exit; the next phase's scheduler replaces them.
         say("SCHEDULER_DONE " + json.dumps({job["name"]: self.state[job["name"]]["status"] for job in self.jobs}))
 
 

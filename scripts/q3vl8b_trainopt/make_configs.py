@@ -11,7 +11,7 @@ optimizer) and changes only what the campaign contract fixes:
 * measurement: timing segments, full-state snapshots, dev/test validation;
 * purpose-specific control (init state, pilot window, fork).
 
-    python scripts/q3vl8b_trainopt/make_configs.py --old-task <a100_qwen3vl8b_200k_s42> \
+    python scripts/q3vl8b_trainopt/make_configs.py --old-task <200K matrix task dir> \
         --devtest <shared_data/devtest_regen> --out <campaign>/configs
 """
 

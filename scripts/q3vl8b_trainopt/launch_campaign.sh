@@ -1,12 +1,12 @@
 #!/bin/bash
-# Qwen3-VL-8B training-systems campaign on one 8-GPU node.
+# Qwen3-VL-8B training-systems campaign on one node.
 #
 #   CAMPAIGN=<campaign dir> bash launch_campaign.sh configs   # freeze configs + provenance
 #   CAMPAIGN=<campaign dir> bash launch_campaign.sh <phase>   # run a phase (prep | core) in the background
 #
 # Machine paths come from TRAINOPT_ENV, an environment file kept on the node (not in the
 # repository) that exports VELA_OLD_TASK, VELA_CORPUS, VELA_DEVTEST, VELA_TARGET, VELA_LOCAL,
-# HF_CACHE_HOME, TP, FLOOR_PY and FLOOR_SCRIPT. The campaign directory follows the contract
+# HF_CACHE_HOME, TP and optionally FLOOR_PY and FLOOR_SCRIPT. The campaign directory follows the contract
 # layout (configs/, provenance/, raw/, tables/; work/ holds the run directories).
 set -euo pipefail
 : "${TRAINOPT_ENV:?set TRAINOPT_ENV to the node environment file}" "${CAMPAIGN:?set CAMPAIGN to the campaign directory}"
