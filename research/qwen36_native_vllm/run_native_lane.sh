@@ -1,14 +1,14 @@
 #!/bin/bash
 # One native-eval lane (TP=2 by default) for one Qwen3.6 method on this node.
 #   run_native_lane.sh <method> <gpus e.g. 0,1> <source jsonl> <num_prompts> <repeats> <run name>
-# Frozen settings live in this file; the evidence directory is node-local (/dev/shm,
+# Frozen settings live in this file; the evidence directory is node-local (tmpfs,
 # per-stage compile caches are many small files) and is archived to cephfs at the end
 # without the caches.
 set -euo pipefail
 METHOD=$1 GPUS=$2 SOURCE=$3 NUM=$4 REPEATS=$5 NAME=$6
 
 # Machine paths come from a site file kept outside the repository, defining
-# REPO PY TASK SHM TARGET IMAGES (and optionally HF_HOME).
+# REPO PY TASK SHM TARGET IMAGES (and optionally HF_HOME and Q36_PRELAUNCH).
 : "${Q36_SITE:?set Q36_SITE to the site env file}"
 source "$Q36_SITE"
 DRAFT=$TASK/exports/$METHOD
@@ -47,18 +47,13 @@ ARGS+=(--runtime-manifest "$MANIFEST")
 
 echo "[lane] $(date '+%F %T') $(hostname -I | cut -d' ' -f1) method=$METHOD gpus=$GPUS source=$SOURCE n=$NUM repeats=$REPEATS out=$OUT"
 
-# Clear this lane's cards of site placeholders (keep_gpu_busy occupiers and utilisation
-# floors) before the lease; the protocol itself never stops a foreign process and
-# refuses a busy card. The site guard may floor a card again while an engine loads;
-# that is recorded, and only extra apps inside timed windows invalidate a run.
-for g in ${GPUS//,/ }; do
-  for pg in $(ps -eo pgid,args | awk -v g="$g" '$2=="bash" && $3 ~ /keep_gpu_busy\.sh$/ && $4==g {print $1}' | sort -u); do
-    kill -TERM -- "-$pg" 2>/dev/null
-  done
-  for pid in $(ps -eo pid,args | awk -v g="$g" '$2 ~ /python3?$/ && $3 ~ /gpu_floor\.py$/ && $4=="--gpu" && $5==g {print $1}'); do
-    kill -TERM "$pid" 2>/dev/null
-  done
-done
+# An optional site hook (Q36_PRELAUNCH, given the lane's GPU list) may release site
+# processes on this lane's cards before the lease; the protocol itself never stops a
+# foreign process and refuses a busy card. Extra apps seen while an engine loads are
+# recorded, and only extra apps inside timed windows invalidate a run.
+if [ -n "${Q36_PRELAUNCH:-}" ]; then
+  "$Q36_PRELAUNCH" "$GPUS" || true
+fi
 for _ in $(seq 60); do
   busy=0
   for g in ${GPUS//,/ }; do

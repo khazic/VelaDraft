@@ -17,7 +17,7 @@ methods; nothing is chosen per method or from test-set speed.
 | Item | Value |
 | --- | --- |
 | Target | `Qwen/Qwen3.6-35B-A3B`, revision `995ad96eacd98c81ed38be0c5b274b04031597b0`, BF16 |
-| Tensor parallel | TP=2 per lane (target and draft), four lanes on one 8-GPU node, batch 1 |
+| Tensor parallel | TP=2 per lane (target and draft), concurrent lanes on disjoint GPU pairs of one node, batch 1 |
 | Chat template | target template with `enable_thinking=false` (training identity) |
 | System prompt | MMSpec reference (`evaluation/utils.py::build_prompt`): "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions." |
 | Multi-turn | image on the first user turn only; earlier assistant turns are the untimed native AR reference outputs (MMSpec construction) |
@@ -93,7 +93,7 @@ test: 600 sessions, 723 turns, six topics x 100 sessions. Smoke: 12 testmini
 sessions (first two per topic; multi-turn topic restricted to sessions with at
 least two turns), functional checks only.
 
-## Hardware note
+## Fused-MoE kernels
 
-Runs use 8x A800-SXM4-80GB (A100-class); there is no tuned fused-MoE config for
-this shape on A100 or A800 in vLLM 0.22.1, so both arms use the default.
+vLLM 0.22.1 ships no tuned fused-MoE config for this expert shape on the
+evaluation hardware, so both arms use the default kernel configuration.

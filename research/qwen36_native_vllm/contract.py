@@ -2,7 +2,7 @@
 
 CPU only: imports Torch-free values so exporters and preflights can run on a
 login node. Values come from the finished 400K training checkpoints
-(runs/veladraft/a100_qwen36_moe_400k_s42/runs/<method>/train/ckpt_final.pt).
+(<task>/runs/<method>/train/ckpt_final.pt).
 """
 from __future__ import annotations
 
