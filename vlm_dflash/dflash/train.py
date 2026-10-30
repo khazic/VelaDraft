@@ -101,7 +101,7 @@ def _clone_tree(value):
     return value
 
 
-def _reconcile_train_log(log_path: Path, committed_step: int) -> None:
+def _reconcile_train_log(log_path: Path, committed_step: int, step_key: str = "step") -> None:
     """Trim ``train_log.jsonl`` back to the checkpoint's committed progress.
 
     Rows past ``committed_step`` were written after the last resumable
@@ -110,6 +110,7 @@ def _reconcile_train_log(log_path: Path, committed_step: int) -> None:
     Uncommitted rows are preserved as a recovery artifact
     (``train_log.uncommitted.jsonl``) instead of being deleted, and a
     truncated final line from an interrupted write counts as uncommitted too.
+    The timing logs use the same rule on their ``stop_step``.
     """
     if not log_path.exists():
         return
@@ -120,7 +121,7 @@ def _reconcile_train_log(log_path: Path, committed_step: int) -> None:
         if not raw.strip():
             continue
         try:
-            step = int(json.loads(raw)["step"])
+            step = int(json.loads(raw)[step_key])
         except Exception:
             uncommitted.append(raw if raw.endswith("\n") else raw + "\n")
             continue
@@ -133,10 +134,10 @@ def _reconcile_train_log(log_path: Path, committed_step: int) -> None:
         tmp_path.write_text(payload, encoding="utf-8")
         tmp_path.replace(log_path)
     if uncommitted:
-        recovery_path = log_path.with_name("train_log.uncommitted.jsonl")
+        recovery_path = log_path.with_name(log_path.stem + ".uncommitted.jsonl")
         recovery_path.write_text("".join(uncommitted), encoding="utf-8")
         log(
-            f"train: reconciled train log to committed step {committed_step} "
+            f"train: reconciled {log_path.name} to committed step {committed_step} "
             f"({len(uncommitted)} uncommitted rows -> {recovery_path.name})"
         )
 
@@ -1549,6 +1550,8 @@ def train_dflash(
             # Exact-resume gate passed: make the log reflect the checkpoint's
             # committed progress before the replay appends new rows.
             _reconcile_train_log(log_path, int(resume_state["step"]))
+            for name in ("timing_windows.jsonl", "timing_segments.jsonl"):
+                _reconcile_train_log(train_dir / name, int(resume_state["step"]), step_key="stop_step")
         epochs_for_cadence = max(1, int(train_cfg.get("num_epochs", 6)))
         steps_per_epoch = max(1, total_steps // epochs_for_cadence)
         cadence_fraction = train_cfg.get("save_every_fraction_of_epoch")

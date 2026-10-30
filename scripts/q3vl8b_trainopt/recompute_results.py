@@ -21,6 +21,9 @@ from collections import defaultdict
 from pathlib import Path
 
 UPDATES_PER_EPOCH = 25000
+# The arm that is the Optimized system in each window stage. DFly stage 2 trains with
+# e2e-TV, which never calls the fused KL path, so Optimized reduces to compaction there.
+OPTIMIZED_ARM = {("dfly", "stage2"): "compaction"}
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -211,8 +214,8 @@ def window_tables(raw: Path) -> tuple[list, list, list, list, dict, list]:
                          "max_peak_allocated_gib": arm_peak,
                          "memory_reduction_pct": 100 * (1 - arm_peak / ref_peak) if ref_peak and arm_peak else None}
                 ablation.append(entry)
-                if scope == "online" and arm == "opt":
-                    paired[(method, stage, arm)] = entry
+                if scope == "online" and arm == OPTIMIZED_ARM.get((method, stage), "opt"):
+                    paired[(method, stage, "opt")] = entry
     # Whole-run pairing per method: combine its stages' windows.
     for method in {key[0] for key in paired}:
         parts = [entry for key, entry in paired.items() if key[0] == method]

@@ -3,7 +3,8 @@
     python3 scheduler.py --jobs jobs.json --state-dir <campaign>/raw/scheduler --gpus 0,1,2,3,4,5,6,7
 
 ``jobs.json`` is a list of ``{name, config, run_dir, gpus, pin, deps, after, wait_files, pre, post,
-extra_args}``.
+post_always, on_fail, extra_args}``; ``post`` hooks run after exit code 0, ``on_fail`` hooks after
+any other, ``post_always`` hooks after both.
 A job starts once every dependency finished with exit code 0 and enough GPUs are free
 (two-GPU jobs get an aligned pair). When ``FLOOR_SCRIPT`` is set, a GPU without a job
 carries that site process (``FLOOR_PY FLOOR_SCRIPT --gpu <g> --util 0.45``) until a job on
@@ -73,6 +74,13 @@ def post_drop_recording(_job: dict, arg: str) -> None:
 HOOKS = {"seed_from_init": pre_seed_from_init, "freeze_init": post_freeze_init, "drop_recording": post_drop_recording}
 
 
+def launcher_alive(pid: int | None) -> bool:
+    try:
+        return pid is not None and b"launch_run.sh" in Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+
+
 def run_hooks(job: dict, key: str) -> None:
     for spec in job.get(key) or []:
         name, _, arg = spec.partition(":")
@@ -90,9 +98,14 @@ class Scheduler:
         for job in jobs:
             entry = self.state.setdefault(job["name"], {"status": "pending"})
             if entry["status"] == "running":
-                entry["status"] = "pending"  # the previous scheduler died with it
+                # Jobs run in their own session and can outlive a killed scheduler.
+                if launcher_alive(entry.get("pid")):
+                    raise SystemExit(f"{job['name']} (pid {entry['pid']}) from a previous scheduler is still "
+                                     "running; wait for it or stop it before restarting")
+                entry["status"] = "pending"
         self.free = list(gpus)
         self.running: dict[str, tuple[subprocess.Popen, list[int], float]] = {}
+        self.log_offsets: dict[str, int] = {}
         self.floors: dict[int, subprocess.Popen] = {}
         self.kill_stray_floors()
 
@@ -156,12 +169,22 @@ class Scheduler:
         for gpu in gpus:
             self.free.remove(gpu)
             self.floor_on(gpu)
-        run_hooks(job, "pre")
+        try:
+            run_hooks(job, "pre")
+        except Exception as exc:
+            say(f"PRE HOOK FAILED {job['name']}: {exc!r}")
+            self.free.extend(gpus)
+            self.free.sort()
+            self.state[job["name"]].update(status="failed", rc=98, ended=now())
+            self.save()
+            return
         cpus = ",".join(f"{g * CORES_PER_GPU}-{g * CORES_PER_GPU + CORES_PER_GPU - 1}" for g in gpus)
         env = dict(os.environ, CPUS=cpus, THREADS=str(job.get("threads", 8)))
         cmd = ["bash", str(HERE / "launch_run.sh"), job["config"], job["run_dir"], ",".join(map(str, gpus))]
         cmd += list(job.get("extra_args") or [])
         Path(job["run_dir"]).mkdir(parents=True, exist_ok=True)
+        stdout = Path(job["run_dir"]) / "stdout.log"
+        self.log_offsets[job["name"]] = stdout.stat().st_size if stdout.exists() else 0
         proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
         started = now()
         self.running[job["name"]] = (proc, gpus, started)
@@ -177,7 +200,10 @@ class Scheduler:
             job = next(job for job in self.jobs if job["name"] == name)
             log = Path(job["run_dir"]) / "stdout.log"
             try:
-                started_loop = TRAIN_LOOP_MARK in log.read_text(errors="replace")
+                # launch_run.sh appends every attempt to the same log: read this attempt only.
+                with log.open("rb") as fh:
+                    fh.seek(self.log_offsets.get(name, 0))
+                    started_loop = TRAIN_LOOP_MARK in fh.read().decode(errors="replace")
             except OSError:
                 started_loop = False
             if started_loop:
@@ -198,6 +224,12 @@ class Scheduler:
                 except Exception as exc:  # a failed hook fails the job
                     say(f"POST HOOK FAILED {name}: {exc!r}")
                     rc = 99
+            try:
+                if rc:
+                    run_hooks(job, "on_fail")
+                run_hooks(job, "post_always")
+            except Exception as exc:
+                say(f"CLEANUP HOOK FAILED {name}: {exc!r}")
             self.state[name].update(status="done" if rc == 0 else "failed", rc=rc, ended=ended)
             self.save()
             for gpu in gpus:
@@ -216,7 +248,8 @@ class Scheduler:
         # point that runs out of memory is a result, not a failure of the chain).
         return (
             all(self.state.get(dep, {}).get("status") == "done" for dep in job.get("deps") or [])
-            and all(self.state.get(dep, {}).get("status") in ("done", "failed") for dep in job.get("after") or [])
+            and all(self.state.get(dep, {}).get("status") in ("done", "failed", "blocked")
+                    for dep in job.get("after") or [])
             and all(Path(path).exists() for path in job.get("wait_files") or [])
         )
 

@@ -121,13 +121,19 @@ def main_phase(camp: Path) -> list[dict]:
              6: probes[6] + scaling["dflash2"], 7: probes[7] + scaling["dfly"]}
     for gpu, items in lanes.items():
         jobs += _lane(gpu, items, camp)
-    # The last replay arm of a snapshot frees that recording (tens of GB of node-local memory).
+    # Replay arms need their snapshot's complete recording. The last replay arm frees the
+    # recording (tens of GB of node-local memory) whatever its exit code, and a failed
+    # recording frees itself, since its replay arms are then blocked.
     last_arm: dict[str, dict] = {}
     for job in jobs:
         if job["name"].startswith("replay_") and not job["name"].endswith("_record"):
-            last_arm[job["name"].rsplit("_", 1)[0]] = job
+            prefix = job["name"].rsplit("_", 1)[0]
+            job["deps"] = [prefix + "_record"]
+            last_arm[prefix] = job
     for prefix, job in last_arm.items():
-        job["post"] = [f"drop_recording:{prefix[len('replay_'):]}"]
+        drop = [f"drop_recording:{prefix[len('replay_'):]}"]
+        job["post_always"] = drop
+        next(j for j in jobs if j["name"] == prefix + "_record")["on_fail"] = drop
     return jobs
 
 

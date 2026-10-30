@@ -146,3 +146,15 @@ def test_feature_replay_reproduces_the_recorded_updates(tmp_path):
     replayed = _run(_cfg(feature_replay={"mode": "replay", "dir": str(replay_dir)}), resume_state=replay)
     for mine, ref in zip(replayed["history"], recorded["history"]):
         assert mine["loss"] == pytest.approx(ref["loss"], abs=1e-9)
+
+
+def test_resume_trims_timing_records_past_the_checkpoint(tmp_path):
+    from vlm_dflash.dflash.train import _reconcile_train_log
+
+    path = tmp_path / "timing_segments.jsonl"
+    rows = [{"start_step": 0, "stop_step": 250}, {"start_step": 250, "stop_step": 500},
+            {"start_step": 500, "stop_step": 750}]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    _reconcile_train_log(path, 500, step_key="stop_step")
+    assert [json.loads(line)["stop_step"] for line in path.read_text().splitlines()] == [250, 500]
+    assert json.loads((tmp_path / "timing_segments.uncommitted.jsonl").read_text())["stop_step"] == 750
