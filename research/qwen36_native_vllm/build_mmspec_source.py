@@ -10,25 +10,18 @@ topic and category plus the source line index are kept on every row.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, OrderedDict
-import hashlib
+from collections import Counter
 import json
 from pathlib import Path
 import subprocess
+
+from common import sha256
 
 COMMIT = "290486861eabd746075ca776adb66175636c1fc0"
 TOPICS = ("general vqa", "text vqa", "image captioning", "chart understanding",
           "complex reasoning pro", "multi-turn conversation")
 EXPECTED = dict(sessions=600, turns=723, turn_histogram={1: 530, 2: 18, 3: 51, 4: 1})
 SMOKE_PER_TOPIC = 2
-
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(8 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def sharegpt(row: dict, index: int) -> dict:
@@ -88,10 +81,7 @@ def main() -> None:
         if by_id.get(row["id"]) != row:
             raise ValueError(f"testmini row {row['id']} differs from the full test row")
     args.out.mkdir(parents=True, exist_ok=True)
-    image_hashes = OrderedDict()
-    for row in test:
-        path = images / row["image"]
-        image_hashes[row["image"]] = sha256(path)
+    image_hashes = {row["image"]: sha256(images / row["image"]) for row in test}
     full = [sharegpt(row, i) for i, row in enumerate(test)]
     index = {r["id"]: i for i, r in enumerate(test)}
     smoke = [sharegpt(by_id[i], index[i]) for i in smoke_ids(mini)]

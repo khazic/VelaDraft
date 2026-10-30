@@ -15,7 +15,6 @@ import unittest
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import torch
 from torch import nn
-import torch.nn.functional as F
 
 import contract
 

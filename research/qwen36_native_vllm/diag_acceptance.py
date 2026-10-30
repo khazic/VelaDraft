@@ -16,6 +16,8 @@ import json
 import os
 from pathlib import Path
 
+import contract
+
 
 class Q36Diag:
     def q36_diag(self):
@@ -70,7 +72,7 @@ def main():
                   max_num_batched_tokens=4096, gpu_memory_utilization=0.85, enable_prefix_caching=False,
                   mm_processor_cache_gb=0, limit_mm_per_prompt={"image": 1}, enforce_eager=False,
                   generation_config="vllm", disable_log_stats=False,
-                  mm_processor_kwargs=dict(min_pixels=65536, max_pixels=1048576),
+                  mm_processor_kwargs=dict(min_pixels=contract.IMAGE_MIN_PIXELS, max_pixels=contract.IMAGE_MAX_PIXELS),
                   worker_extension_cls="diag_acceptance.Q36Diag")
     if args.disable_custom_all_reduce:
         kwargs["disable_custom_all_reduce"] = True
@@ -80,21 +82,21 @@ def main():
                                    max_cudagraph_capture_size=8),
               "full_decode_only": dict(mode=3, cudagraph_mode="FULL_AND_PIECEWISE", cudagraph_capture_sizes=[1, 8],
                                        max_cudagraph_capture_size=8)}
-    if args.ar and args.graph != "default":
+    if args.graph != "default":
         kwargs["compilation_config"] = graphs[args.graph]
     if not args.ar:
         kwargs.update(attention_config={"backend": "FLASH_ATTN"},
-                      speculative_config=dict(model=args.draft, method="dflash", num_speculative_tokens=7,
+                      speculative_config=dict(model=args.draft, method="dflash",
+                                              num_speculative_tokens=contract.SPECULATIVE_TOKENS,
                                               draft_tensor_parallel_size=tp, attention_backend="FLASH_ATTN",
                                               use_local_argmax_reduction=False))
-        if args.graph != "default":
-            kwargs["compilation_config"] = graphs[args.graph]
         if args.block_size:
             kwargs["block_size"] = args.block_size
     llm = LLM(**kwargs)
     print("DIAG_WIRING " + json.dumps(llm.collective_rpc("q36_diag")[0], default=str), flush=True)
-    processor = AutoProcessor.from_pretrained(args.target, min_pixels=65536, max_pixels=1048576)
-    params = SamplingParams(temperature=0, max_tokens=args.max_tokens, stop_token_ids=[248046, 248044])
+    processor = AutoProcessor.from_pretrained(args.target, min_pixels=contract.IMAGE_MIN_PIXELS,
+                                              max_pixels=contract.IMAGE_MAX_PIXELS)
+    params = SamplingParams(temperature=0, max_tokens=args.max_tokens, stop_token_ids=contract.TARGET_STOP_TOKEN_IDS)
     rows = [json.loads(line) for line in Path(args.source).read_text().splitlines() if line.strip()][:args.sessions]
 
     def counters():
@@ -105,14 +107,13 @@ def main():
         return out
 
     import time
-    import torch
     for row in rows * args.repeat:
         question = row["conversations"][0]["value"]
         messages = ([{"role": "system", "content": [{"type": "text", "text": args.system_prompt}]}]
                     if args.system_prompt else [])
         messages.append({"role": "user", "content": [{"type": "image"}, {"type": "text", "text": question}]})
         prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                               enable_thinking=False)
+                                               **contract.TARGET_CHAT_TEMPLATE_KWARGS)
         image = Image.open(io.BytesIO((Path(args.images_dir) / row["images"][0]).read_bytes())).convert("RGB")
         before = counters()
         start = time.perf_counter()

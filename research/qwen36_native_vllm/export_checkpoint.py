@@ -21,28 +21,26 @@ import torch
 from safetensors.torch import load_file, save_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import sha256 as sha256_file
 import contract
+import dflare_adapter
+import dflash2_adapter
+import dfly_adapter
+import head_adapters
+import jetspec_adapter
 
 FINAL_STEP = 75000
 DFLASH_ARCHITECTURE = "DFlashDraftModel"
-# method -> (training algorithm field, trained tensor count, vLLM architecture, method markers)
+DFLASH_TENSOR_COUNT = 36
+# method (also the checkpoint's training algorithm field) -> (trained tensor count,
+# vLLM architecture, method markers); adapter methods take their own constants.
 METHODS = {
-    "dflash": ("dflash", 36, DFLASH_ARCHITECTURE, ()),
-    "dfly": ("dfly", 42, "DFlashDFlyQwen36ForCausalLM", ("qwen36_dfly_v1",)),
-    "dflare": ("dflare", 42, "DFlashDFlareQwen36ForCausalLM", ("qwen36_dflare_v1",)),
-    "jetspec": ("jetspec", 36, DFLASH_ARCHITECTURE, ("qwen36_jetspec_local_block_v1",)),
-    "dflash2": ("dflash2", 51, "DFlash2Qwen36ForCausalLM", ("qwen36_dflash2_v1",)),
-    "dspark": ("dspark", 40, "DFlashDSparkQwen36ForCausalLM", ("qwen36_dspark_v1",)),
-    "domino": ("domino", 40, "DFlashDominoQwen36ForCausalLM", ("qwen36_domino_v1",)),
+    "dflash": (DFLASH_TENSOR_COUNT, DFLASH_ARCHITECTURE, ()),
+    "jetspec": (DFLASH_TENSOR_COUNT, DFLASH_ARCHITECTURE, (jetspec_adapter.MARKER,)),
+    **{name: (adapter.TENSOR_COUNT, adapter.ARCH, (adapter.MARKER,))
+       for name, adapter in (("dfly", dfly_adapter), ("dflare", dflare_adapter), ("dflash2", dflash2_adapter))},
+    **{name: (count, arch, (marker,)) for name, (arch, marker, count, _) in head_adapters.METHODS.items()},
 }
-
-
-def sha256_file(path) -> str:
-    h = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(8 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def tensor_sha256(tensor: torch.Tensor) -> str:
@@ -52,7 +50,7 @@ def tensor_sha256(tensor: torch.Tensor) -> str:
 def native_config(config: dict, method: str) -> tuple[dict, list[str]]:
     """Dispatch-only config edits; trained hyperparameters stay untouched."""
     contract.validate_draft_config(config, require_marker=False)
-    _, _, architecture, markers = METHODS[method]
+    _, architecture, markers = METHODS[method]
     config = json.loads(json.dumps(config))
     config["architectures"] = [architecture]
     for marker in (contract.MARKER, *markers):
@@ -65,7 +63,8 @@ def native_config(config: dict, method: str) -> tuple[dict, list[str]]:
 
 
 def export(method: str, checkpoint: Path, output: Path) -> dict:
-    algorithm, tensor_count, _, _ = METHODS[method]
+    algorithm = method
+    tensor_count = METHODS[method][0]
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Export destination must be empty: {output}")
     checkpoint_hash = sha256_file(checkpoint)

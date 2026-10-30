@@ -42,8 +42,7 @@ ARGS=(--target "$TARGET" --draft "$DRAFT" --source "$SOURCE" --images-dir "$IMAG
       --speculative-tokens 7 --gpu-memory-utilization "$GPU_MEM"
       --min-pixels $MIN_PIXELS --max-pixels $MAX_PIXELS
       --chat-template-kwargs "$TEMPLATE_KWARGS" --sd-cudagraph-mode "$SD_GRAPH"
-      --system-prompt "$SYSTEM_PROMPT" --out "$OUT")
-ARGS+=(--runtime-manifest "$MANIFEST")
+      --system-prompt "$SYSTEM_PROMPT" --runtime-manifest "$MANIFEST" --out "$OUT")
 
 echo "[lane] $(date '+%F %T') $(hostname -I | cut -d' ' -f1) method=$METHOD gpus=$GPUS source=$SOURCE n=$NUM repeats=$REPEATS out=$OUT"
 

@@ -10,23 +10,14 @@ weights sha256, tensor count, HF mirror repo id.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
 import contract
+from common import METHODS, sha256
 
-METHODS = ["dflash", "dspark", "domino", "jetspec", "dflash2", "dflare", "dfly"]
 FINAL_STEP = 75000
 EPOCHS = 3
-
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(8 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def main():

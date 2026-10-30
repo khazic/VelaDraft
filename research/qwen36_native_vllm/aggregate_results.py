@@ -15,24 +15,20 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
-import math
 from pathlib import Path
-import random
+import sys
+
+from common import METHODS as METHOD_ORDER, sha256
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from vlm_dflash.eval.native import bootstrap_ci  # noqa: E402
 
 TASKS = [("general vqa", "General VQA"), ("text vqa", "Text VQA"), ("image captioning", "Image Captioning"),
          ("chart understanding", "Chart VQA"), ("complex reasoning pro", "Complex Reasoning"),
          ("multi-turn conversation", "Multi-turn Conversation")]
-METHOD_ORDER = ["dflash", "dspark", "domino", "jetspec", "dflash2", "dflare", "dfly"]
-
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(8 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+TASKS_AND_ALL = TASKS + [(None, "ALL")]
+TASK_LABELS = [label for _, label in TASKS_AND_ALL]
 
 
 def quantile(values, q):
@@ -45,25 +41,12 @@ def quantile(values, q):
     return values[low] * (1 - frac) + values[min(low + 1, len(values) - 1)] * frac
 
 
-def bootstrap(ar_by_session, sd_by_session, samples=2000, seed=42):
-    keys = sorted(ar_by_session)
-    a = [sum(ar_by_session[k]) for k in keys]
-    b = [sum(sd_by_session[k]) for k in keys]
-    rng = random.Random(seed)
-    draws = []
-    for _ in range(samples):
-        picked = [rng.randrange(len(keys)) for _ in keys]
-        draws.append(sum(a[i] for i in picked) / sum(b[i] for i in picked))
-    return quantile(draws, .025), quantile(draws, .975)
-
-
 def load_run(run_dir: Path):
     result_path = run_dir / "result.json"
     result = json.loads(result_path.read_text())
     evidence = run_dir / "result.evidence"
     plan = json.loads((evidence / "plan.json").read_text())
-    topic = {s["id"]: s.get("topic") for s in plan["sessions"]}
-    category = {s["id"]: s.get("category") for s in plan["sessions"]}
+    sessions = {s["id"]: s for s in plan["sessions"]}
     rows = []
     for stage in sorted(evidence.glob("[as][rd]_r*.json")):
         report = json.loads(stage.read_text())
@@ -71,34 +54,41 @@ def load_run(run_dir: Path):
         for row in report["rows"]:
             if row.get("phase") != "timed":
                 continue
-            rows.append(dict(arm=arm, repeat=int(repeat), id=row["id"], turn=row["turn"], topic=topic[row["id"]],
-                             category=category[row["id"]], wall_seconds=row["wall_seconds"],
+            rows.append(dict(arm=arm, repeat=int(repeat), id=row["id"], turn=row["turn"], topic=sessions[row["id"]].get("topic"),
+                             category=sessions[row["id"]].get("category"), wall_seconds=row["wall_seconds"],
                              output_tokens=len(row["tokens"]), prompt_tokens=len(row["prompt_token_ids"]),
                              finish_reason=row["finish_reason"], tokens=row["tokens"],
                              counters=row.get("official_counters")))
     return result, plan, rows, result_path
 
 
+def per_session(group):
+    walls = {}
+    for r in group:
+        walls.setdefault(r["id"], []).append(r["wall_seconds"])
+    return walls
+
+
 def summarize(method, result, rows, al_rows):
     by_key = {(r["arm"], r["repeat"], r["id"], r["turn"]): r for r in rows}
+    peak = (result.get("resource_evidence") or {}).get("peak_memory_used_mib")
+    peak_mib = max(peak.values()) if peak else None
     out = []
-    for topic, label in TASKS + [(None, "ALL")]:
+    for topic, label in TASKS_AND_ALL:
         selected = [r for r in rows if topic is None or r["topic"] == topic]
         ar = [r for r in selected if r["arm"] == "ar"]
         sd = [r for r in selected if r["arm"] == "sd"]
         if not ar or len(ar) != len(sd):
             continue
-        ar_s, sd_s = {}, {}
-        for r in ar:
-            ar_s.setdefault(r["id"], []).append(r["wall_seconds"])
-        for r in sd:
-            sd_s.setdefault(r["id"], []).append(r["wall_seconds"])
-        low, high = bootstrap(ar_s, sd_s)
+        ar_s, sd_s = per_session(ar), per_session(sd)
+        low, high = bootstrap_ci(ar_s, sd_s)
+        ar_seconds = sum(r["wall_seconds"] for r in ar)
+        sd_seconds = sum(r["wall_seconds"] for r in sd)
         exact = sum(by_key[("ar", r["repeat"], r["id"], r["turn"])]["tokens"] == r["tokens"] for r in sd)
         row = {"method": method, "task": label, "sessions": len(ar_s), "timed_pairs": len(sd),
-               "speedup_sum_ar_over_sd": sum(r["wall_seconds"] for r in ar) / sum(r["wall_seconds"] for r in sd),
+               "speedup_sum_ar_over_sd": ar_seconds / sd_seconds,
                "speedup_ci95_low": low, "speedup_ci95_high": high,
-               "ar_seconds": sum(r["wall_seconds"] for r in ar), "sd_seconds": sum(r["wall_seconds"] for r in sd)}
+               "ar_seconds": ar_seconds, "sd_seconds": sd_seconds}
         for arm, group in (("ar", ar), ("sd", sd)):
             walls = [r["wall_seconds"] for r in group]
             row.update({f"{arm}_latency_p50": quantile(walls, .5), f"{arm}_latency_p90": quantile(walls, .9),
@@ -117,8 +107,7 @@ def summarize(method, result, rows, al_rows):
                         "accepted_draft_tokens_per_round": accepted / rounds if rounds else None,
                         "accepted_draft_fraction": accepted / proposed if proposed else None,
                         "acceptance_source": "separate stats-enabled supplement (1 repeat), vLLM convention 1+accepted/drafts"})
-        peak = (result.get("resource_evidence") or {}).get("peak_memory_used_mib")
-        row["peak_gpu_memory_mib"] = max(peak.values()) if peak else None
+        row["peak_gpu_memory_mib"] = peak_mib
         out.append(row)
     return out
 
@@ -149,7 +138,7 @@ def main():
                                     "repeats": result.get("repeats"), "sessions": result.get("sessions"),
                                     "timed_pairs": result.get("timed_pairs"), "paper_ready": result.get("paper_ready")}
     summary.sort(key=lambda r: (METHOD_ORDER.index(r["method"]) if r["method"] in METHOD_ORDER else 99,
-                                [t[1] for t in TASKS + [(None, "ALL")]].index(r["task"])))
+                                TASK_LABELS.index(r["task"])))
     args.out.mkdir(parents=True, exist_ok=True)
     for name, table in (("summary_by_task.csv", summary), ("requests.csv", requests)):
         if table:

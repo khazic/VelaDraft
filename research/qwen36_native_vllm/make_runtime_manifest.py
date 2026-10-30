@@ -7,9 +7,10 @@ Paths are absolute; SHA256 values are computed from the files as they are now.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
+
+from common import sha256
 
 HERE = Path(__file__).resolve().parent
 COMMON = ["contract.py", "spatial_adapter.py"]
@@ -46,20 +47,14 @@ METHODS = {
 }
 
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(8 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", choices=sorted(METHODS), required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    if args.out.exists():
+        raise FileExistsError(f"Refusing to overwrite {args.out}")
     bootstrap, extra, scope = METHODS[args.method]
     sources = [HERE / name for name in (bootstrap, *COMMON, *extra)]
     checkpoint = args.checkpoint.resolve()
@@ -71,8 +66,6 @@ def main() -> None:
         "environment": {"Q36_DRAFT_CUDAGRAPH": "PIECEWISE"},
         "files": {str(path): sha256(path) for path in (*sources, checkpoint)},
     }
-    if args.out.exists():
-        raise FileExistsError(f"Refusing to overwrite {args.out}")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
