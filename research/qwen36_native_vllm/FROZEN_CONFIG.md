@@ -64,10 +64,17 @@ runs: vLLM convention 1 + accepted draft tokens / drafts.
 ## GPU ownership in a PID-namespaced pod
 
 `nvidia-smi` reports host PIDs that the pod cannot resolve, so the per-PID
-ownership check is replaced by count mode: every leased GPU must be empty at start
-and at each stage boundary, and carry at most two compute apps while a stage runs
-(the client context on the first GPU plus one TP worker). Per-GPU memory is
+ownership check is replaced by count mode. Every leased GPU must be empty at start.
+After each stage the lease waits up to 180 s for the stage's processes to release the
+cards. While a stage runs, the first GPU may carry two compute apps (the client
+context and TP rank 0) and every other GPU one (its TP worker). An extra app inside
+a timed window invalidates the run; extra apps outside timed windows (engine load,
+compile, warmup, stage boundaries) are counted and reported. Per-GPU memory is
 sampled every two seconds. No continuous exclusivity is claimed.
+
+The formal runs were made at evaluator commit `69efbba`, which applied the two-app
+bound to every GPU of a lane; `audit_ownership.py` re-checks their resource evidence
+against the per-GPU bounds above.
 
 ## Methods and scope
 

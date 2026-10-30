@@ -127,14 +127,15 @@ def test_native_flags_are_observations_not_a_lossless_certificate():
 def test_late_preservation_failure_removes_headline(tmp_path,monkeypatch):
     from types import SimpleNamespace
     from vlm_dflash.eval import native_resources
-    module=native();p,ref,stages=reports();p['method']='dflash'
+    module=native();p,ref,stages=reports();p['method']='dflash';p['gpus']=[0]
     fake_uuid='GPU-864585d7-9789-e033-7781-e773f55178c6'
     class Lease:
-        uuid=fake_uuid
+        uuid=fake_uuid;uuids=[fake_uuid]
         def __init__(self,*args):pass
         def __enter__(self):return self
         def __exit__(self,*args):pass
-        def validate(self):return {'status':'complete','began_wall_ns':0,'ended_wall_ns':10**20}
+        def boundary(self):pass
+        def validate(self,timed_windows=None):return {'status':'complete','began_wall_ns':0,'ended_wall_ns':10**20}
     monkeypatch.setattr(native_resources,'GPULease',Lease)
     monkeypatch.setattr(module,'make_plan',lambda args:p)
     monkeypatch.setattr(module,'verify_plan',lambda p:None)
@@ -156,6 +157,8 @@ def test_late_preservation_failure_removes_headline(tmp_path,monkeypatch):
     assert module.run(args)==1
     out=json.loads((tmp_path/'result.json').read_text())
     assert out['status']=='failed' and 'speedup_sum_ar_over_sd' not in out
+    # The run must get as far as the late identity check, not fail earlier.
+    assert len(calls)==2 and 'late checkpoint identity failure' in out['error']
 
 
 

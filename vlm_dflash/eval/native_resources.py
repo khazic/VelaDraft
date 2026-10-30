@@ -66,8 +66,9 @@ def ownership_mode():
     """'pid' (default): reported GPU PIDs are resolved against this process tree.
     'count': the container's PID namespace hides host PIDs (nvidia-smi reports host
     PIDs, /proc only container PIDs), so ownership cannot be resolved. Then every
-    leased GPU must be empty at each stage boundary and carry at most
-    VELADRAFT_GPU_MAX_OWN_APPS compute apps while a stage runs."""
+    leased GPU must be empty at each stage boundary; while a stage runs the first leased
+    GPU carries at most VELADRAFT_GPU_MAX_OWN_APPS compute apps (the client context plus
+    TP rank 0) and every other leased GPU at most one (its TP worker)."""
     mode=os.environ.get('VELADRAFT_GPU_OWNERSHIP','pid')
     if mode not in ('pid','count'):raise ValueError('VELADRAFT_GPU_OWNERSHIP must be pid or count')
     return mode
@@ -79,6 +80,9 @@ class GPULease:
         self.indices=[index] if isinstance(index,int) else list(index)
         self.index=self.indices[0];self.path=Path(path);self.rows=[];self.stop=threading.Event();self.locks=[];self.recent_own_gpu_pids={};self.proc_complete=process_visibility_complete();self.watcher_error=None
         self.mode=ownership_mode();self.max_own_apps=int(os.environ.get('VELADRAFT_GPU_MAX_OWN_APPS','2'))
+    def app_bound(self,uuid,uuids,phase):
+        if phase in ('start','boundary'):return 0
+        return self.max_own_apps if uuid==uuids[0] else 1
     def per_gpu_pids(self,uuids):
         return {uuid:sorted({int(v) for v in query('-i',uuid,'--query-compute-apps=pid').splitlines() if v.strip()}) for uuid in uuids}
     def sample(self,phase):
@@ -89,7 +93,7 @@ class GPULease:
                 row['ownership']='count';row['per_gpu_pids']=self.per_gpu_pids(uuids)
                 row['per_gpu_memory_mib']={u:int(query('-i',u,'--query-gpu=memory.used')) for u in uuids}
                 row['reported_pids']=sorted({p for v in row['per_gpu_pids'].values() for p in v})
-                row['over_bound']=[u for u,v in row['per_gpu_pids'].items() if len(v)>(0 if phase in ('start','boundary') else self.max_own_apps)]
+                row['over_bound']=[u for u,v in row['per_gpu_pids'].items() if len(v)>self.app_bound(u,uuids,phase)]
                 row['foreign_pids']=[];row['stale_observed_own_pids']=[]
                 row['ended_wall_ns']=time.time_ns();self.rows.append(row)
                 with self.path.open('a') as stream:stream.write(json.dumps(row)+'\n')
@@ -168,6 +172,6 @@ class GPULease:
         peak={u:max(m[u] for m in memory) for u in memory[0]} if memory else None
         return dict(status='complete',samples=len(self.rows),continuous_exclusivity_claim=False,gpu_uuids=getattr(self,'uuids',None) or [self.uuid],
                     peak_memory_used_mib=peak,
-                    ownership_mode=getattr(self,'mode','pid'),max_own_apps_per_gpu=getattr(self,'max_own_apps',None),
+                    ownership_mode=getattr(self,'mode','pid'),max_own_apps_per_gpu=({u:self.app_bound(u,self.uuids,'sample') for u in self.uuids} if getattr(self,'mode','pid')=='count' else None),
                     extra_app_samples_outside_timed=outside,
                     began_wall_ns=self.rows[0]['began_wall_ns'],ended_wall_ns=self.rows[-1]['ended_wall_ns'])

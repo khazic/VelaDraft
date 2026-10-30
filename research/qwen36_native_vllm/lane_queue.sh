@@ -9,7 +9,7 @@ Q=$1 GPUS=$2 SOURCE=$3 NUM=$4 REPEATS=$5 PREFIX=$6
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${Q36_SITE:?set Q36_SITE}"
 source "$Q36_SITE"
-LANE="gpu${GPUS/,/_}"
+LANE="gpu${GPUS//,/_}"
 mkdir -p "$Q"/{todo,running,done,failed}
 say() { echo "[queue $LANE] $(date '+%F %T') $*"; }
 while true; do
