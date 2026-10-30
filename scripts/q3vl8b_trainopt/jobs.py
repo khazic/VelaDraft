@@ -15,6 +15,8 @@ import json
 import sys
 from pathlib import Path
 
+from make_configs import WINDOW_ARMS, WINDOW_SNAPSHOTS, snapshot
+
 STAGES = {"dflash2": ["single_stage"], "dfly": ["stage1", "stage2"]}
 
 
@@ -53,18 +55,6 @@ def core(camp: Path) -> list[dict]:
     return jobs
 
 
-WINDOW_SNAPSHOTS = {
-    ("dflash2", "single_stage"): [10000, 30000, 60000],
-    ("dfly", "stage1"): [2500, 10000, 15000],
-    ("dfly", "stage2"): [30000, 45000, 60000],
-}
-WINDOW_ARMS = {
-    ("dflash2", "single_stage"): ["ref", "d1", "opt"],
-    ("dfly", "stage1"): ["ref", "compaction", "opt"],
-    ("dfly", "stage2"): ["ref", "compaction"],
-}
-
-
 def _lane(gpu: int, items: list[tuple[str, str, list[str]]], camp: Path) -> list[dict]:
     """Jobs pinned to one GPU and run one after another (``after``), whatever each exit code."""
     cfg, work = camp / "configs", camp / "work"
@@ -80,7 +70,7 @@ def _lane(gpu: int, items: list[tuple[str, str, list[str]]], camp: Path) -> list
 
 
 def _snap(camp: Path, method: str, step: int) -> str:
-    return str(camp / "work" / f"fixed_config_{method}_s42_ref" / "train" / f"state_step{step:07d}.pt")
+    return str(snapshot(camp / "work", method, step))
 
 
 def main_phase(camp: Path) -> list[dict]:

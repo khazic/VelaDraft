@@ -29,15 +29,15 @@ evaluated, and at a stage boundary both adjacent stages.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
 import torch
 
 from ..data.sharegpt import load_sharegpt
-from ..utils import log, read_jsonl
+from ..utils import append_jsonl, log, read_jsonl
 from .features import collate_features
+from .instrument import participating_devices
 from .trainer_core import NoValidAnchorsError
 
 
@@ -72,10 +72,7 @@ class ObjectiveValidator:
             raise ValueError("validation.splits must name a 'dev' split.")
         self.done: set[tuple[str, int]] = set()
         if self.out_path.exists():
-            for line in self.out_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    record = json.loads(line)
-                    self.done.add((record["split"], int(record["step"])))
+            self.done.update((record["split"], int(record["step"])) for record in read_jsonl(self.out_path))
         log(f"validation: {self.split_sizes}; every {self.every} updates, extra {sorted(self.extra)}")
 
     def _stages(self, step: int) -> list[int | None]:
@@ -106,8 +103,7 @@ class ObjectiveValidator:
             self.done.add((split, step))
             for record in self.evaluate(split, step):
                 record["reasons"] = reasons
-                with open(self.out_path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(record) + "\n")
+                append_jsonl(self.out_path, record)
 
     def evaluate(self, split: str, step: int) -> list[dict]:
         module = self.module
@@ -116,10 +112,7 @@ class ObjectiveValidator:
         saved_stage = getattr(module, "_recipe_stage_index", None)
         acc = {stage: _Accumulator() for stage in stages}
         started = time.perf_counter()
-        fork_devices = [self.device] + [
-            d for d in getattr(self.source, "target_devices", []) or [] if torch.device(d) != self.device
-        ]
-        cuda_devices = [d for d in fork_devices if torch.device(d).type == "cuda"]
+        cuda_devices = [d for d in participating_devices(self.device, self.source) if d.type == "cuda"]
         self.source.set_phase("validation")
         try:
             with torch.no_grad(), torch.random.fork_rng(devices=cuda_devices):

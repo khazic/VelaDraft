@@ -10,7 +10,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.test_dflash2 import HIDDEN, _tiny_batch, _tiny_dflash2_module
+from tests.test_dflash2 import _tiny_batch, _tiny_dflash2_module
 
 ARMS = {
     "d0": {},
@@ -114,4 +114,3 @@ def test_bf16_d2_tracks_reference():
     for name, grad in ref_grads.items():
         scale = grad.abs().max().clamp_min(1e-8)
         assert float((grads[name] - grad).abs().max() / scale) < 5e-2, name
-    assert HIDDEN > 0

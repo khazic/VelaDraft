@@ -18,7 +18,9 @@ from pathlib import Path
 
 import torch
 
-STAGES = {"dflash2": {"single_stage": 0}, "dfly": {"stage1": 0, "stage2": 18750}}
+from make_configs import TRANSITION_STEP
+
+STAGES = {"dflash2": {"single_stage": 0}, "dfly": {"stage1": 0, "stage2": TRANSITION_STEP}}
 ARMS = {"dflash2": ["ref", "d1", "opt", "ref_repeat"], "dfly": ["ref", "compaction", "opt", "ref_repeat"]}
 COUNT_KEYS = ("valid_tokens", "w_effective_positions", "w_supervised_rows", "w_kept_rows", "w_samples")
 # BF16 drafter, fp32 masters: loss components agree to bf16 rounding of the logits.

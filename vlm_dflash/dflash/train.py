@@ -699,6 +699,20 @@ def run_training_loop(
             base_dataset.end_fast_forward()
     from .instrument import LoopInstrument
 
+    def train_state() -> dict:
+        return gather_train_state(
+            module,
+            master_parameters,
+            optimizer,
+            scheduler,
+            step=step,
+            micro_step=micro_step,
+            skipped_batches=skipped_batches,
+            history=history,
+            steps_total_planned=total_steps,
+            micro_batch_size=micro_batch,
+        )
+
     instrument = LoopInstrument(
         train_cfg,
         device,
@@ -839,20 +853,19 @@ def run_training_loop(
                 if metrics.pos_correct is not None and metrics.pos_count is not None:
                     row["slot0_accuracy"] = float(metrics.pos_correct[0] / metrics.pos_count[0].clamp_min(1))
                 history.append(row)
+                measured = instrument.finish_update(step)
                 if log_path is not None:
                     # Measurement fields go to the log only; ``history`` (carried
                     # in every resumable state) keeps the training metrics.
                     logged = {
                         **row,
-                        **instrument.finish_update(step),
+                        **measured,
                         "micro_step": micro_step,
                         "consumed_microbatches": micro_step + skipped_batches,
                         "recipe_stage": getattr(module, "recipe_stage_index", None),
                     }
                     with open(log_path, "a", encoding="utf-8") as fh:
                         fh.write(json.dumps(logged) + "\n")
-                else:
-                    instrument.finish_update(step)
                 if log_every and step % log_every == 0:
                     log(f"step {step}/{total_steps} loss={row['loss']:.4f} acc={row['accuracy']:.3f} "
                         f"al={row['accept_len']:.2f}")
@@ -862,23 +875,7 @@ def run_training_loop(
                     and (step % save_every == 0 or step in (extra_save_steps or ()))
                     and step < total_steps
                 ):
-                    instrument.aux(
-                        "checkpoint",
-                        lambda step=step, micro_step=micro_step, skipped_batches=skipped_batches: on_checkpoint(
-                            gather_train_state(
-                                module,
-                                master_parameters,
-                                optimizer,
-                                scheduler,
-                                step=step,
-                                micro_step=micro_step,
-                                skipped_batches=skipped_batches,
-                                history=history,
-                                steps_total_planned=total_steps,
-                                micro_batch_size=micro_batch,
-                            )
-                        ),
-                    )
+                    instrument.aux("checkpoint", lambda: on_checkpoint(train_state()))
                 if validation_hook is not None:
                     instrument.aux("validation", validation_hook, step, epoch_end=False, final=step >= total_steps)
                 instrument.boundary(step)
@@ -922,23 +919,7 @@ def run_training_loop(
         # re-emitting the already-logged tail. (Interrupted runs keep their
         # last mid-run checkpoint; the log reconciliation in the caller keeps
         # that replay duplicate-free.)
-        instrument.aux(
-            "checkpoint",
-            lambda: on_checkpoint(
-                gather_train_state(
-                    module,
-                    master_parameters,
-                    optimizer,
-                    scheduler,
-                    step=step,
-                    micro_step=micro_step,
-                    skipped_batches=skipped_batches,
-                    history=history,
-                    steps_total_planned=total_steps,
-                    micro_batch_size=micro_batch,
-                )
-            ),
-        )
+        instrument.aux("checkpoint", lambda: on_checkpoint(train_state()))
 
     runtime.synchronize(device)
     losses = [row["loss"] for row in history]
@@ -993,18 +974,7 @@ def run_training_loop(
             "batches": regroup["stats"]["batches"],
             "identity_batches": regroup["stats"]["identity_batches"],
         }
-    final_state = gather_train_state(
-        module,
-        master_parameters,
-        optimizer,
-        scheduler,
-        step=step,
-        micro_step=micro_step,
-        skipped_batches=skipped_batches,
-        history=history,
-        steps_total_planned=total_steps,
-        micro_batch_size=micro_batch,
-    )
+    final_state = train_state()
     return {
         "summary": summary,
         "history": history,

@@ -23,13 +23,13 @@ a peak.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
 import torch
 
 from .. import runtime
+from ..utils import append_jsonl
 
 GIB = float(1 << 30)
 
@@ -40,20 +40,21 @@ def _peak_reserved(device) -> int | None:
     return None
 
 
-def _reset_reserved(device) -> None:
-    if torch.device(device).type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
+def participating_devices(device, source=None) -> list[torch.device]:
+    """The training device followed by the source's other target devices."""
+    device = torch.device(device)
+    devices = [device]
+    for extra in getattr(source, "target_devices", None) or []:
+        if torch.device(extra) != device:
+            devices.append(torch.device(extra))
+    return devices
 
 
 class LoopInstrument:
     def __init__(self, train_cfg: dict, device, source=None, out_dir: Path | None = None):
         self.device = torch.device(device)
         self.source = source
-        devices = [self.device]
-        for extra in getattr(source, "target_devices", None) or []:
-            if torch.device(extra) != self.device:
-                devices.append(torch.device(extra))
-        self.devices = devices
+        self.devices = participating_devices(self.device, source)
         self.windows = {}
         for pair in train_cfg.get("timing_windows") or []:
             start, stop = int(pair[0]), int(pair[1])
@@ -90,8 +91,8 @@ class LoopInstrument:
             reserved = _peak_reserved(device)
             reading[str(device)] = {"allocated": int(allocated or 0), "reserved": int(reserved or 0)}
             if reset:
+                # On CUDA this resets the reserved peak as well.
                 runtime.reset_peak_memory_stats(device)
-                _reset_reserved(device)
         holders = [self.run_peak] + [w["peak"] for w in self.open_windows]
         if self.segment is not None:
             holders.append(self.segment["peak"])
@@ -111,10 +112,8 @@ class LoopInstrument:
         }
 
     def _write(self, name: str, record: dict) -> None:
-        if self.out_dir is None:
-            return
-        with open(self.out_dir / name, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+        if self.out_dir is not None:
+            append_jsonl(self.out_dir / name, record)
 
     def _reset_update(self) -> None:
         self.workload: dict = {}
@@ -148,7 +147,6 @@ class LoopInstrument:
             # Validation memory is not training memory: drop its peaks.
             for device in self.devices:
                 runtime.reset_peak_memory_stats(device)
-                _reset_reserved(device)
             spent = time.perf_counter() - began
             self.totals[f"{kind}_s"] = self.totals.get(f"{kind}_s", 0.0) + spent
             self.aux_in_update += spent
@@ -200,7 +198,7 @@ class LoopInstrument:
             record = self._close(window, now, target, step)
             self.window_results.append(record)
             self._write("timing_windows.jsonl", record)
-        if self.segment is not None and (segment_due or self.segment["start_step"] is None):
+        if self.segment is not None and segment_due:
             record = self._close(self.segment, now, target, step)
             self._write("timing_segments.jsonl", record)
             self.segment = None
