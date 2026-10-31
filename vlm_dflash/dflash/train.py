@@ -42,13 +42,16 @@ from .features import FeatureDataset, collate_features, offline_feature_digest
 from .regroup import COST_ANCHOR_WEIGHT, SampleStat, plan_groups, row_weights, sample_z_rows
 
 
-def _make_optimizer_and_scheduler(parameters, train_cfg: dict, total_steps: int):
+def _make_optimizer_and_scheduler(parameters, train_cfg: dict, total_steps: int, constant_lr: float | None = None):
     optimizer = torch.optim.AdamW(
         parameters,
-        lr=float(train_cfg.get("lr", 6e-4)),
+        lr=float(train_cfg.get("lr", 6e-4)) if constant_lr is None else float(constant_lr),
         betas=tuple(train_cfg.get("betas", (0.9, 0.95))),
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
+    if constant_lr is not None:
+        # Continuation runs: a flat rate, no warmup and no decay.
+        return optimizer, torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
     warmup_ratio = float(train_cfg.get("warmup_ratio", 0.04))
     min_lr_ratio = float(train_cfg.get("min_lr_ratio", 0.1))
     warmup_steps = max(1, int(warmup_ratio * total_steps))
@@ -78,6 +81,132 @@ def compute_total_steps(dataset_len: int, train_cfg: dict, steps: int | None = N
     epochs = int(train_cfg.get("num_epochs", 6))
     steps_per_epoch = max(1, math.ceil(math.ceil(dataset_len / micro_batch) / accumulation))
     return steps if steps is not None else steps_per_epoch * epochs
+
+
+def continuation_settings(cfg: dict) -> dict | None:
+    """The ``continuation`` block of a run that extends a finished run (``None`` otherwise).
+
+    A continuation starts from the finished run's resumable state
+    (``source_state``: weights, fp32 masters, AdamW moments, RNG and data
+    position), adds ``add_steps`` optimizer steps at a constant ``lr`` with no
+    warmup, and holds every schedule-driven objective setting (recipe stage,
+    Domino's ``lambda_base``) at the source run's final position instead of
+    re-deriving it from the longer budget. ``train.*`` stays the source plan,
+    so the source state passes the exact-resume gates unchanged.
+    ``source_final`` (optional) is the source's ``ckpt_final.pt``; its weights
+    must equal the state's bit for bit.
+    """
+    block = cfg.get("continuation")
+    if not block:
+        return None
+    if not block.get("source_state"):
+        raise ValueError("continuation.source_state (the source run's train/ckpt_last.pt) is required.")
+    add_steps = int(block.get("add_steps") or 0)
+    if add_steps < 1:
+        raise ValueError(f"continuation.add_steps must be >= 1, got {block.get('add_steps')!r}.")
+    lr = float(block.get("lr") or 0.0)
+    if not lr > 0.0:
+        raise ValueError(f"continuation.lr must be > 0, got {block.get('lr')!r}.")
+    return {
+        "source_state": str(block["source_state"]),
+        "source_final": str(block["source_final"]) if block.get("source_final") else None,
+        "add_steps": add_steps,
+        "lr": lr,
+        "lr_schedule": "constant",
+    }
+
+
+def _continuation_record(cont: dict | None, source_steps: int) -> dict | None:
+    """What a continuation run's checkpoints record about their origin."""
+    if cont is None:
+        return None
+    return {**cont, "source_steps": int(source_steps), "objective_schedule_held_at": int(source_steps)}
+
+
+def _check_continuation_record(resume_state: dict, expected: dict | None) -> None:
+    """A resumed state must come from the same continuation (or from none)."""
+    recorded = resume_state.get("continuation")
+    if expected is None and recorded is not None:
+        raise ValueError(
+            "train/ckpt_last.pt was written by a continuation run; resume it with the same "
+            "continuation block."
+        )
+    if expected is None:
+        return
+    if recorded is None:
+        raise ValueError("train/ckpt_last.pt is not a continuation state; start the continuation in a new run directory.")
+    keys = ("source_state", "add_steps", "lr", "source_steps")
+    if any(recorded.get(key) != expected.get(key) for key in keys):
+        raise ValueError(
+            f"train/ckpt_last.pt continues {({key: recorded.get(key) for key in keys})}, "
+            f"this run configures {({key: expected.get(key) for key in keys})}."
+        )
+
+
+def _assert_same_tensors(left: dict, right: dict, what: str) -> None:
+    if set(left) != set(right):
+        raise RuntimeError(f"{what}: tensor names differ ({sorted(set(left) ^ set(right))[:5]}).")
+    for name, tensor in left.items():
+        other = right[name]
+        if tensor.dtype != other.dtype or tensor.shape != other.shape or not torch.equal(tensor, other):
+            raise RuntimeError(f"{what}: tensor {name!r} differs.")
+
+
+def load_continuation_source(
+    cont: dict,
+    *,
+    algorithm_name: str,
+    mode: str,
+    feature_source_digest: str,
+    source_steps: int,
+    contract: dict,
+    plan_version: str,
+    plan_digest: str,
+    cfg: dict,
+) -> dict:
+    """Load and verify the finished state a continuation starts from.
+
+    The state must pass the source run's own exact-resume gate (algorithm,
+    feature source, plan, identity, recipe stage), have completed its plan, and
+    its fp32 masters must round to its weights; with ``source_final`` set, the
+    final checkpoint must hold the same weights bit for bit.
+    """
+    source = torch.load(cont["source_state"], map_location="cpu", weights_only=False)
+    if source.get("continuation") is not None:
+        raise ValueError(f"{cont['source_state']} is itself a continuation state; continue from the original run.")
+    validate_resume_state(
+        source,
+        algorithm_name=algorithm_name,
+        mode=mode,
+        feature_source_digest=feature_source_digest,
+        total_steps=source_steps,
+        contract=contract,
+        plan_version=plan_version,
+        plan_digest=plan_digest,
+        recipe_stage=_expected_recipe_stage(cfg, algorithm_name, step=int(source["step"]), total_steps=source_steps),
+    )
+    if int(source["step"]) != int(source_steps):
+        raise ValueError(
+            f"{cont['source_state']} stopped at step {source['step']} of {source_steps}; "
+            "only a finished run can be continued (resume it instead)."
+        )
+    for name, master in source["master"].items():
+        weight = source["model"][name]
+        if not torch.equal(master.to(weight.dtype), weight):
+            raise RuntimeError(f"{cont['source_state']}: fp32 master of {name!r} does not round to its weight.")
+    if cont.get("source_final"):
+        final = torch.load(cont["source_final"], map_location="cpu", weights_only=False)
+        if final.get("algorithm") != algorithm_name or int(final.get("step", -1)) != int(source_steps):
+            raise ValueError(
+                f"{cont['source_final']} is algorithm {final.get('algorithm')!r} at step {final.get('step')}, "
+                f"expected {algorithm_name!r} at step {source_steps}."
+            )
+        _assert_same_tensors(source["model"], final["model"], "continuation source state vs final checkpoint")
+    log(
+        f"train: continuation source verified ({algorithm_name}, step {source['step']}/{source_steps}, "
+        f"plan {plan_digest[:12]}, final checkpoint {'matched' if cont.get('source_final') else 'not given'})"
+    )
+    return source
 
 
 def _clone_tree(value):
@@ -225,7 +354,7 @@ def _unwrap_subset(dataset):
     return dataset
 
 
-def gather_train_state(module, master_parameters, optimizer, scheduler, *, step, micro_step, skipped_batches, history, steps_total_planned) -> dict:
+def gather_train_state(module, master_parameters, optimizer, scheduler, *, step, micro_step, skipped_batches, history, steps_total_planned, recipe_position=None) -> dict:
     """Self-contained resume payload: weights, fp32 masters, optimizer, schedule.
 
     All tensors are cloned (``.cpu()`` alone does not copy on CPU devices), so
@@ -252,10 +381,12 @@ def gather_train_state(module, master_parameters, optimizer, scheduler, *, step,
     # cross a stage boundary. The stage is computed from the *committed* step
     # (the same step the resumed run's progress hook will feed the module),
     # not from the module's live index, which still refers to the stage of the
-    # step that just finished.
+    # step that just finished. A continuation holds its schedule position
+    # (``recipe_position``) instead of deriving it from the step.
     recipe = getattr(module, "train_recipe", None)
     if recipe is not None:
-        state["recipe_stage"] = int(recipe.stage_index(int(step), int(steps_total_planned)))
+        position = recipe_position or (int(step), int(steps_total_planned))
+        state["recipe_stage"] = int(recipe.stage_index(*position))
     return state
 
 
@@ -451,7 +582,16 @@ def run_training_loop(
     on_checkpoint=None,
     save_every: int | None = None,
     extra_save_steps: set[int] | None = None,
+    continuation: dict | None = None,
 ) -> dict:
+    """Shared training loop.
+
+    ``continuation`` (``{"source_steps", "lr", "fresh"}``) extends a finished
+    run whose state is ``resume_state``: a constant ``lr`` replaces the source
+    schedule (``fresh``: first start from the source; otherwise a resume of the
+    continuation run itself), and the algorithm progress hook stays at
+    ``(source_steps, source_steps)`` for every step.
+    """
     train_cfg = cfg.get("train", {})
     micro_batch = int(train_cfg.get("micro_batch_size", 8))
     accumulation = max(1, int(train_cfg.get("grad_accumulation_steps", 1)))
@@ -600,7 +740,24 @@ def run_training_loop(
         name: parameter.detach().float().clone().requires_grad_(True)
         for name, parameter in module.draft_model.named_parameters()
     }
-    optimizer, scheduler = _make_optimizer_and_scheduler(list(master_parameters.values()), train_cfg, total_steps)
+    optimizer, scheduler = _make_optimizer_and_scheduler(
+        list(master_parameters.values()),
+        train_cfg,
+        total_steps,
+        constant_lr=None if continuation is None else float(continuation["lr"]),
+    )
+    if continuation is not None:
+        if resume_state is None:
+            raise ValueError("a continuation needs the source (or its own) resumable state.")
+        held = int(continuation["source_steps"])
+
+        def progress_position(_step: int) -> tuple[int, int]:
+            return held, held
+    else:
+
+        def progress_position(current: int) -> tuple[int, int]:
+            return current, total_steps
+
     module.train()
     history, nan_seen, skipped_batches = [], False, 0
     step = 0
@@ -613,7 +770,14 @@ def run_training_loop(
         for name, parameter in master_parameters.items():
             parameter.data.copy_(resume_state["master"][name].float())
         optimizer.load_state_dict(resume_state["optimizer"])
-        scheduler.load_state_dict(resume_state["scheduler"])
+        if continuation is not None and continuation["fresh"]:
+            # The source's warmup/cosine schedule is finished: keep its AdamW
+            # moments, run the continuation's own flat rate from here.
+            for group in optimizer.param_groups:
+                group["lr"] = group["initial_lr"] = float(continuation["lr"])
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+        else:
+            scheduler.load_state_dict(resume_state["scheduler"])
         step = int(resume_state["step"])
         micro_step = int(resume_state.get("micro_step", 0))
         skipped_batches = int(resume_state.get("skipped_no_anchor_batches", 0))
@@ -627,6 +791,24 @@ def run_training_loop(
             f"train: resumed from step {step} "
             f"(micro_step={micro_step}, skipped={skipped_batches}, history_rows={len(history)})"
         )
+    held_settings = None
+    if continuation is not None:
+        rates = sorted({float(group["lr"]) for group in optimizer.param_groups})
+        if rates != [float(continuation["lr"])]:
+            raise RuntimeError(f"continuation learning rate is {rates}, expected a constant {continuation['lr']}.")
+        progress_hook = getattr(module, "set_training_progress", None)
+        if progress_hook is not None:
+            progress_hook(*progress_position(step))
+        held_settings = {
+            "objective_schedule_held_at": list(progress_position(step)),
+            "recipe_stage": getattr(module, "recipe_stage_index", None),
+            "lambda_base": getattr(module, "current_lambda_base", None),
+        }
+        log(
+            f"train: continuation from step {step} to {total_steps} at constant lr {continuation['lr']:g}; "
+            f"objective schedule held at {held_settings['objective_schedule_held_at']} "
+            f"(recipe_stage={held_settings['recipe_stage']}, lambda_base={held_settings['lambda_base']})"
+        )
     # Let modules whose diagnostics should reflect the optimizer trajectory (not
     # the bf16 live parameter) hold a reference to their fp32 master copies.
     attach_master_parameters = getattr(module.draft_model, "set_master_parameters", None)
@@ -639,6 +821,9 @@ def run_training_loop(
     # "head created but never updated" stays detectable.
     audit_fraction = float(getattr(module, "coverage_audit_fraction", 0.0) or 0.0)
     coverage_audit_step = max(0, min(total_steps - 1, int(total_steps * audit_fraction)))
+    if continuation is not None:
+        # The first continuation update.
+        coverage_audit_step = int(continuation["source_steps"])
     started = time.time()
     epoch_wall_seconds: list[float] = []
     from .trainer_core import NoValidAnchorsError
@@ -697,7 +882,7 @@ def run_training_loop(
             # that do not define it (DFlash, DSpark) are unaffected.
             progress_hook = getattr(module, "set_training_progress", None)
             if progress_hook is not None:
-                progress_hook(step, total_steps)
+                progress_hook(*progress_position(step))
             try:
                 if regroup is None:
                     metrics = module(
@@ -814,6 +999,7 @@ def run_training_loop(
                             skipped_batches=skipped_batches,
                             history=history,
                             steps_total_planned=total_steps,
+                            recipe_position=progress_position(step),
                         )
                     )
                 if step >= total_steps:
@@ -862,6 +1048,7 @@ def run_training_loop(
                 skipped_batches=skipped_batches,
                 history=history,
                 steps_total_planned=total_steps,
+                recipe_position=progress_position(step),
             )
         )
 
@@ -891,6 +1078,8 @@ def run_training_loop(
             torch.cuda.get_device_name(device) if device.type == "cuda" else None
         ),
     }
+    if continuation is not None:
+        summary["continuation"] = {"lr": float(continuation["lr"]), **held_settings}
     if regroup is not None:
         summary["regroup"] = {
             "mode": regroup["mode"],
@@ -1124,12 +1313,17 @@ def preflight_resume(
     resume_path = run_dir / "train" / "ckpt_last.pt"
     if not resume_path.exists():
         raise FileNotFoundError(f"no resume checkpoint at {resume_path}.")
-    total_steps = compute_total_steps(dataset_len, cfg.get("train", {}), steps)
+    cont = continuation_settings(cfg)
+    base_steps = compute_total_steps(dataset_len, cfg.get("train", {}), steps)
+    total_steps = base_steps + cont["add_steps"] if cont is not None else base_steps
     plan_digest = training_plan_digest(
         cfg, algorithm.name, dataset_len=dataset_len, contract=contract
     )
     resume_state = torch.load(resume_path, map_location="cpu", weights_only=False)
     plan_version = plan_scheme_version(algorithm.name)
+    stage_step, stage_total = (
+        (base_steps, base_steps) if cont is not None else (int(resume_state.get("step", 0)), total_steps)
+    )
     validate_resume_state(
         resume_state,
         algorithm_name=algorithm.name,
@@ -1139,10 +1333,9 @@ def preflight_resume(
         contract=contract,
         plan_version=plan_version,
         plan_digest=plan_digest,
-        recipe_stage=_expected_recipe_stage(
-            cfg, algorithm.name, step=int(resume_state.get("step", 0)), total_steps=total_steps
-        ),
+        recipe_stage=_expected_recipe_stage(cfg, algorithm.name, step=stage_step, total_steps=stage_total),
     )
+    _check_continuation_record(resume_state, _continuation_record(cont, base_steps))
     return {
         "mode": mode,
         "algorithm": algorithm.name,
@@ -1329,7 +1522,10 @@ def train_dflash(
         init_state = {key: value.clone() for key, value in module.draft_model.state_dict().items()}
 
         train_dir = ensure_dir(run_dir / "train")
-        total_steps = compute_total_steps(len(dataset), train_cfg, steps)
+        cont = continuation_settings(cfg)
+        base_steps = compute_total_steps(len(dataset), train_cfg, steps)
+        total_steps = base_steps + cont["add_steps"] if cont is not None else base_steps
+        continuation_record = _continuation_record(cont, base_steps)
         plan_digest = training_plan_digest(
             cfg, algorithm.name, dataset_len=len(dataset), contract=contract
         )
@@ -1378,8 +1574,13 @@ def train_dflash(
         }
         if online_source is not None:
             checkpoint_common["target_device"] = str(online_source.target_device)
+        if continuation_record is not None:
+            checkpoint_common["continuation"] = continuation_record
 
         resume_state = None
+        loop_continuation = None
+        if cont is not None:
+            loop_continuation = {"source_steps": base_steps, "lr": cont["lr"], "fresh": not resume}
         if resume:
             # Read-only gate before any write: a refused resume must leave
             # config / ckpt_init / logs / provenance byte-identical, and a legal
@@ -1400,10 +1601,27 @@ def train_dflash(
                 plan_version=plan_version,
                 plan_digest=plan_digest,
                 recipe_stage=_expected_recipe_stage(
-                    cfg, algorithm.name, step=int(resume_state.get("step", 0)), total_steps=total_steps
+                    cfg,
+                    algorithm.name,
+                    step=base_steps if cont is not None else int(resume_state.get("step", 0)),
+                    total_steps=base_steps if cont is not None else total_steps,
                 ),
             )
+            _check_continuation_record(resume_state, continuation_record)
             overfit = {"enabled": True, "resumed": True}
+        elif cont is not None:
+            resume_state = load_continuation_source(
+                cont,
+                algorithm_name=algorithm.name,
+                mode=mode,
+                feature_source_digest=feature_source_digest,
+                source_steps=base_steps,
+                contract=contract,
+                plan_version=plan_version,
+                plan_digest=plan_digest,
+                cfg=cfg,
+            )
+            overfit = {"enabled": False, "continuation": True}
         else:
             torch.save({**checkpoint_common, "step": 0, "model": init_state}, train_dir / "ckpt_init.pt")
             if online_source is not None:
@@ -1424,7 +1642,7 @@ def train_dflash(
             # committed progress before the replay appends new rows.
             _reconcile_train_log(log_path, int(resume_state["step"]))
         epochs_for_cadence = max(1, int(train_cfg.get("num_epochs", 6)))
-        steps_per_epoch = max(1, total_steps // epochs_for_cadence)
+        steps_per_epoch = max(1, base_steps // epochs_for_cadence)
         cadence_fraction = train_cfg.get("save_every_fraction_of_epoch")
         if cadence_fraction is not None:
             save_every = max(1, int(round(steps_per_epoch * float(cadence_fraction))))
@@ -1440,10 +1658,14 @@ def train_dflash(
         from ..objectives import resolve_recipe as _resolve_recipe
 
         _recipe = _resolve_recipe(cfg, algorithm.name)
-        boundary_step = _recipe.split_step(total_steps) if _recipe is not None else None
+        # A continuation holds its stage, so it has no boundary to save at;
+        # it saves (and snapshots) at the end of each epoch it adds instead.
+        boundary_step = _recipe.split_step(total_steps) if _recipe is not None and cont is None else None
         extra_save_steps = set()
         if boundary_step is not None and 0 < int(boundary_step) < total_steps:
             extra_save_steps.add(int(boundary_step))
+        if cont is not None:
+            extra_save_steps.update(range(base_steps + steps_per_epoch, total_steps, steps_per_epoch))
         log(
             f"train: save cadence every {save_every} steps "
             f"(stage boundary step={boundary_step}, milestone_snapshots={milestone_snapshots}, "
@@ -1497,6 +1719,7 @@ def train_dflash(
             on_checkpoint=write_train_state,
             save_every=save_every,
             extra_save_steps=extra_save_steps,
+            continuation=loop_continuation,
         )
         torch.save({**checkpoint_common, "step": output["summary"]["steps"], "model": module.draft_model.state_dict()},
                    train_dir / "ckpt_final.pt")
@@ -1546,6 +1769,8 @@ def train_dflash(
             # block the checkpoints record, echoed into train_summary.json.
             "train_recipe": checkpoint_common.get("train_recipe"),
         }
+        if continuation_record is not None:
+            summary["continuation_source"] = continuation_record
         if online_source is not None:
             summary["feature_source"] = online_source.summary()
             summary["visual_path_check"] = online_visual_check
