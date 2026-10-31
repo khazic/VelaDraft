@@ -11,7 +11,8 @@
 # settings (recipe stage, Domino lambda_base) held at its last update. Same config, corpus,
 # online feature mode and drafter/target GPU split as run_one.sh; after a failure the trainer
 # restarts with --resume from the continuation's own ckpt_last.pt (up to MAX_ATTEMPTS).
-# "smoke" runs one update into $VELA_CONT/smoke/<method> (one attempt).
+# "smoke" runs one update into $VELA_CONT/smoke/<method> (one attempt) and gates it with
+# continue_smoke_check.py.
 # Logs: $VELA_CONT/logs/<method>/ (smoke: logs/smoke_<method>/), stdout.log ends with
 # "EXIT_CODE=0 <method> done" or "EXIT_CODE=1 <method> ...".
 set -Eeuo pipefail
@@ -110,6 +111,10 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   code=$?
   set -e
   if tail -n 200 "$OUT" | grep -q "train: done with steps=$TOTAL"; then
+    if [ "$MODE" = smoke ] && ! "$TP" scripts/a100_qwen3vl8b_200k/continue_smoke_check.py "$RUN" "$SRC" --lr "$LR" >> "$OUT" 2>> "$ERR"; then
+      say "EXIT_CODE=1 $M smoke check failed (see $RUN/smoke_check.json)"
+      exit 1
+    fi
     say "EXIT_CODE=0 $M done"
     exit 0
   fi
