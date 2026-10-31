@@ -34,7 +34,7 @@ def main() -> int:
     source_final = torch.load(args.source_train / "ckpt_final.pt", map_location="cpu", weights_only=False)
     source_step = int(source_final["step"])
     algorithm = source_final["algorithm"]
-    rows = [json.loads(line) for line in open(train / "train_log.jsonl", encoding="utf-8") if line.strip()]
+    rows = [json.loads(line) for line in (train / "train_log.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     if [row["step"] for row in rows] != [source_step + 1]:
         failures.append(f"logged steps {[row['step'] for row in rows]}, expected [{source_step + 1}]")
     for row in rows:
