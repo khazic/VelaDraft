@@ -242,7 +242,8 @@ run_method() {
   log "START method=$method gpu=$gpu K=${KS[$method]}"
 
   if [[ "$SUITE" == smoke || "$SUITE" == all ]]; then
-    local smoke_dir="$dir/smoke" smoke="$smoke_dir/report.json"
+    local smoke_dir="$dir/smoke"
+    local smoke="$smoke_dir/report.json"
     if ((RESUME)) && [[ -f "$smoke" ]] && valid_smoke "$method" "$smoke"; then
       log "SKIP_VALID_SMOKE method=$method"
     else
@@ -264,7 +265,8 @@ run_method() {
   fi
 
   if [[ "$SUITE" == formal || "$SUITE" == all ]]; then
-    local formal_dir="$dir/formal" formal="$formal_dir/report.json"
+    local formal_dir="$dir/formal"
+    local formal="$formal_dir/report.json"
     if ((RESUME)) && [[ -f "$formal" ]] && valid_formal "$method" "$formal"; then
       log "SKIP_VALID_FORMAL method=$method"
     else
