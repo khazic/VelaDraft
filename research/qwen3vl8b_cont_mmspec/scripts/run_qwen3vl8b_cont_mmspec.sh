@@ -59,6 +59,12 @@ SHM="${SHM:-/dev/shm/${USER:-root}_q3vl8b_cont}"
 HF_REPO_ID="${HF_REPO_ID:-khazic/veladraft-qwen3vl8b-200k-cont-dspark}"
 HF_PREFIX="${HF_PREFIX:-eval/qwen3vl8b_mmspec600}"
 
+if [[ -z "$CAMPAIGN_ID" ]] && ((RESUME)); then
+  # Resume the most recent campaign (ids start with a UTC timestamp) unless one is named.
+  CAMPAIGN_ID="$(find "$RESULT_ROOT" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*T[0-9]*Z_*' \
+    -printf '%f\n' 2>/dev/null | grep -v '\.' | sort | tail -n 1 || true)"
+  [[ -n "$CAMPAIGN_ID" ]] || { echo "ERROR: --resume found no campaign under $RESULT_ROOT" >&2; exit 1; }
+fi
 if [[ -z "$CAMPAIGN_ID" ]]; then
   CAMPAIGN_ID="$(date -u +%Y%m%dT%H%M%SZ)_$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo nogit)"
 fi
@@ -133,6 +139,7 @@ done
 [[ -f "$SOURCE" ]] || die "MMSpec source missing: $SOURCE"
 [[ -d "$IMAGES" ]] || die "MMSpec images directory missing: $IMAGES"
 [[ -x "$PYTHON" ]] || die "Python runtime missing/executable bit absent: $PYTHON"
+if ((PUBLISH)); then command -v hf >/dev/null 2>&1 || die "--publish requires the hf CLI"; fi
 "$PYTHON" - <<'PY'
 import importlib.util
 for name in ("torch", "vllm"):
@@ -162,6 +169,12 @@ for path in files:
     cached_sha256(path, database)
 PY
 
+# Written once per campaign; each launch appends its commit to launches.log. Per-file SHA256
+# pins (target, images, source, export, adapter sources, checkpoint) are in every stage's
+# report.evidence/plan.json.
+CODE_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo "$(date -Is) commit=$CODE_COMMIT suite=$SUITE methods=${SELECTED[*]} gpus=$GPUS" >> "$CAMPAIGN_DIR/launches.log"
+if [[ ! -f "$CAMPAIGN_DIR/run_manifest.json" ]]; then
 cat > "$CAMPAIGN_DIR/run_manifest.json" <<EOF_MANIFEST
 {
   "campaign_id": "${CAMPAIGN_ID}",
@@ -176,14 +189,16 @@ cat > "$CAMPAIGN_DIR/run_manifest.json" <<EOF_MANIFEST
   "max_new_tokens": ${MAX_NEW_TOKENS},
   "gpu_memory_utilization": ${GPU_MEM},
   "speculative_tokens": ${K},
-  "code_commit": "$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)",
+  "first_launch_code_commit": "${CODE_COMMIT}",
   "gpu_name": "$(nvidia-smi -i "${GPU_LIST[0]}" --query-gpu=name --format=csv,noheader 2>/dev/null || echo unknown)",
   "exports_and_manifests": "${Q3VL8B_ROOT}/exports (export_receipt.json per method)",
+  "file_sha256": "<method>/<stage>/report.evidence/plan.json",
   "protocol_notes": "research/qwen3vl8b_cont_mmspec/README.md",
   "hf_repo_id": "${HF_REPO_ID}",
   "hf_prefix": "${HF_PREFIX}/${CAMPAIGN_ID}"
 }
 EOF_MANIFEST
+fi
 
 # valid_report <report.json> smoke|formal: complete, resource-verified, and for formal the full
 # paired-turn count with the smoke flag off.
@@ -209,12 +224,13 @@ archive_invalid() {
 # hf_put <local path> <name under the campaign prefix> <commit message>; no-op without --publish.
 hf_put() {
   ((PUBLISH)) || return 0
-  command -v hf >/dev/null 2>&1 || die "--publish requires the hf CLI"
   hf upload "$HF_REPO_ID" "$1" "$HF_PREFIX/$CAMPAIGN_ID/$2" --repo-type model --commit-message "$3"
 }
 
+# A failed upload is logged and retried by a later --resume --publish; it never stops a worker.
 upload_method() {
-  hf_put "$CAMPAIGN_DIR/$1" "$1" "eval: Qwen3-VL-8B CONT $1 MMSpec ${CAMPAIGN_ID}"
+  hf_put "$CAMPAIGN_DIR/$1" "$1" "eval: Qwen3-VL-8B CONT $1 MMSpec ${CAMPAIGN_ID}" ||
+    log "UPLOAD_FAILED method=$1"
 }
 
 run_stage() {
@@ -242,12 +258,26 @@ run_stage() {
   printf '%q ' "${cmd[@]}" > "$stage_dir/command.txt"
   printf '\n' >> "$stage_dir/command.txt"
   "${cmd[@]}" > "$stage_dir/stdout.log" 2>&1 || rc=$?
-  local evidence="${local_out%.json}.evidence"
+  local evidence="${local_out%.json}.evidence" archived=0
   if [[ -d "$evidence" ]]; then
     tar -C "$scratch" --exclude='*/cache' --exclude='*/inductor' -cf - "$(basename "$evidence")" \
-      | tar -C "$stage_dir" -xf -
+      | tar -C "$stage_dir" -xf - || archived=1
   fi
-  if [[ -f "$local_out" ]]; then cp "$local_out" "$out"; fi
+  if [[ -f "$local_out" ]]; then
+    # The archived report must point at the archived evidence, not at the scratch copy.
+    "$PYTHON" - "$local_out" "$out" "$scratch" "$stage_dir" <<'PY' || archived=1
+import json,sys
+src,dst,old,new=sys.argv[1:]
+d=json.load(open(src))
+for key in ("evidence","resource_evidence"):
+    if isinstance(d.get(key),str) and d[key].startswith(old):d[key]=new+d[key][len(old):]
+json.dump(d,open(dst,"w"),indent=2)
+PY
+  fi
+  if ((archived)); then
+    log "ARCHIVE_FAILED method=$method stage=$stage scratch kept at $scratch"
+    return 1
+  fi
   rm -rf "$scratch"
   return "$rc"
 }
@@ -275,6 +305,7 @@ run_suite() {
     log "${tag}_INVALID method=$method"
     return 1
   fi
+  rm -f "$dir/FAILED_${tag}.txt"
 }
 
 run_method() {
@@ -308,27 +339,38 @@ for gpu in "${GPU_LIST[@]}"; do
 done
 wait
 
-"$PYTHON" - "$CAMPAIGN_DIR" > "$CAMPAIGN_DIR/summary.csv" <<'PY'
+# Only reports that pass the formal validity check enter the table as complete; anything else
+# is listed with its failure reason (AGENTS.md section 5).
+"$PYTHON" - "$CAMPAIGN_DIR" "$TIMED_PAIRS" "${ALL_METHODS[@]}" > "$CAMPAIGN_DIR/summary.csv" <<'PY'
 import csv,json,os,sys
-root=sys.argv[1]
-fields=["method","status","sessions","turns","repeats","timed_pairs","speedup_sum_ar_over_sd","ci_low","ci_high","ar_seconds","sd_seconds","error"]
+root,pairs,methods=sys.argv[1],int(sys.argv[2]),sys.argv[3:]
+fields=["method","status","sessions","turns","repeats","timed_pairs","speedup_sum_ar_over_sd","ci_low","ci_high",
+        "ar_seconds","sd_seconds","exact_output_pairs","error"]
+def failure(method):
+    for stage in ("FORMAL","SMOKE"):
+        path=os.path.join(root,method,f"FAILED_{stage}.txt")
+        if os.path.isfile(path):return open(path).read().strip()
+    return "formal report missing"
 rows=[]
-manifest=json.load(open(os.path.join(root,"run_manifest.json")))
-for method in manifest["methods"]:
+for method in methods:
+    if not os.path.isdir(os.path.join(root,method)):continue
+    row=dict.fromkeys(fields); row["method"]=method
     p=os.path.join(root,method,"formal","report.json")
-    row=dict.fromkeys(fields,None); row["method"]=method
-    if os.path.isfile(p):
-        d=json.load(open(p))
-        row.update({k:d.get(k) for k in fields if k in d})
+    d=json.load(open(p)) if os.path.isfile(p) else {}
+    valid=(d.get("status")=="complete" and d.get("resources_verified") is True
+           and d.get("timed_pairs")==pairs and not d.get("smoke",False))
+    if valid:
+        row.update({k:d[k] for k in fields if k in d})
+        row["turns"]=d["timed_pairs"]//d["repeats"]
         row["ci_low"],row["ci_high"]=d.get("session_cluster_CI95") or (None,None)
     else:
-        failed=os.path.join(root,method,"FAILED_FORMAL.txt")
-        row["status"]="failed_or_missing"
-        row["error"]=open(failed).read().strip() if os.path.isfile(failed) else "formal report missing"
+        row["status"]="invalid" if d else "failed_or_missing"
+        row["error"]=failure(method)
     rows.append(row)
 w=csv.DictWriter(sys.stdout,fieldnames=fields); w.writeheader(); w.writerows(rows)
 PY
 
-hf_put "$CAMPAIGN_DIR/summary.csv" summary.csv "eval: summary ${CAMPAIGN_ID}"
-hf_put "$CAMPAIGN_DIR/run_manifest.json" run_manifest.json "eval: manifest ${CAMPAIGN_ID}"
+hf_put "$CAMPAIGN_DIR/summary.csv" summary.csv "eval: summary ${CAMPAIGN_ID}" || log "UPLOAD_FAILED summary.csv"
+hf_put "$CAMPAIGN_DIR/run_manifest.json" run_manifest.json "eval: manifest ${CAMPAIGN_ID}" ||
+  log "UPLOAD_FAILED run_manifest.json"
 log "CAMPAIGN_COMPLETE id=$CAMPAIGN_ID results=$CAMPAIGN_DIR"
