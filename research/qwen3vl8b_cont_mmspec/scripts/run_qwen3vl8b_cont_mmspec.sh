@@ -66,18 +66,28 @@ CAMPAIGN_DIR="$RESULT_ROOT/$CAMPAIGN_ID"
 LOG_DIR="$CAMPAIGN_DIR/logs"
 mkdir -p "$LOG_DIR"
 
-# Every method uses the A800 port in research/qwen3vl8b_cont_mmspec/native: one CPU export and
+# Every method uses the port in research/qwen3vl8b_cont_mmspec/native: one CPU export and
 # one runtime manifest per method, all at K=7 over the trained block of 8 (see README.md).
 ALL_METHODS=(dflash dspark domino jetspec dflash2 dflare dfly)
-declare -A DRAFTS MANIFESTS KS PYTHONS
-for method in "${ALL_METHODS[@]}"; do
-  DRAFTS[$method]="$Q3VL8B_ROOT/exports/$method"
-  MANIFESTS[$method]="$Q3VL8B_ROOT/exports/${method}_runtime.json"
-  KS[$method]=7
-  PYTHONS[$method]="$PYTHON"
-done
+draft_of() { echo "$Q3VL8B_ROOT/exports/$1"; }
+manifest_of() { echo "$Q3VL8B_ROOT/exports/$1_runtime.json"; }
 
-# Native-eval runtime: offline hub, node-local compile caches, count-mode GPU ownership (the pod
+# Frozen protocol (AGENTS.md section 2). K must equal native/contract.py SPECULATIVE_TOKENS.
+K=7
+SESSIONS=600
+TURNS=723
+REPEATS=3
+MAX_NEW_TOKENS=1024
+GPU_MEM=0.78
+TIMED_PAIRS=$((TURNS * REPEATS))
+MIN_PIXELS=65536
+MAX_PIXELS=1048576
+MAX_MODEL_LEN=8192
+TEMPLATE_KWARGS='{"enable_thinking":false}'
+# Verbatim from the handoff launcher (the MMSpec reference reads "the human's questions").
+SYSTEM_PROMPT='A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human questions.'
+
+# Native-eval runtime: offline hub, node-local compile caches, count-mode GPU ownership (a container
 # PID namespace hides host PIDs from nvidia-smi), one client context + one engine core per card.
 mkdir -p "$SHM/gpu_locks" "$SHM/triton" "$SHM/xdg"
 export PYTHONPATH="$REPO"
@@ -116,33 +126,42 @@ else
   IFS=',' read -r -a SELECTED <<< "$METHODS"
 fi
 for method in "${SELECTED[@]}"; do
-  [[ -n "${DRAFTS[$method]+x}" ]] || die "unknown method: $method"
+  [[ " ${ALL_METHODS[*]} " == *" $method "* ]] || die "unknown method: $method"
 done
 
-preflight_method() {
-  local method="$1" py="${PYTHONS[$method]}"
-  [[ -d "${DRAFTS[$method]}" ]] || die "$method draft export missing: ${DRAFTS[$method]}"
-  [[ -f "${MANIFESTS[$method]}" ]] || die "$method runtime manifest missing: ${MANIFESTS[$method]}"
-  [[ -f "$TARGET/config.json" ]] || die "target config missing: $TARGET/config.json"
-  [[ -f "$SOURCE" ]] || die "MMSpec source missing: $SOURCE"
-  [[ -d "$IMAGES" ]] || die "MMSpec images directory missing: $IMAGES"
-  [[ -x "$py" ]] || die "Python runtime missing/executable bit absent: $py"
-  "$py" - <<'PY'
+[[ -f "$TARGET/config.json" ]] || die "target config missing: $TARGET/config.json"
+[[ -f "$SOURCE" ]] || die "MMSpec source missing: $SOURCE"
+[[ -d "$IMAGES" ]] || die "MMSpec images directory missing: $IMAGES"
+[[ -x "$PYTHON" ]] || die "Python runtime missing/executable bit absent: $PYTHON"
+"$PYTHON" - <<'PY'
 import importlib.util
 for name in ("torch", "vllm"):
     if importlib.util.find_spec(name) is None:
         raise SystemExit(f"{name} is not importable in the selected runtime")
 PY
-  log "PREFLIGHT_OK method=$method draft=${DRAFTS[$method]} manifest=${MANIFESTS[$method]} K=${KS[$method]} python=$py"
-}
-
-for method in "${SELECTED[@]}"; do preflight_method "$method"; done
+for method in "${SELECTED[@]}"; do
+  [[ -d "$(draft_of "$method")" ]] || die "$method draft export missing: $(draft_of "$method")"
+  [[ -f "$(manifest_of "$method")" ]] || die "$method runtime manifest missing: $(manifest_of "$method")"
+  log "PREFLIGHT_OK method=$method draft=$(draft_of "$method") manifest=$(manifest_of "$method") K=$K python=$PYTHON"
+done
 if ((PRE_FLIGHT)); then
   log "PREFLIGHT_COMPLETE methods=${SELECTED[*]}"
   exit 0
 fi
 
-mkdir -p "$CAMPAIGN_DIR"
+# Hash the shared inputs once into the digest cache before the method workers start, so
+# concurrent workers do not each read the target weights and every image in full.
+"$PYTHON" - "$QWEN8B_DIGEST_CACHE" "$TARGET" "$SOURCE" "$IMAGES" <<'PY'
+import sys
+from pathlib import Path
+from vlm_dflash.eval.digest_cache import cached_sha256
+database, target, source, images = sys.argv[1:]
+files = [p for p in sorted(Path(target).iterdir()) if p.is_file()]
+files += [Path(source)] + [p for p in sorted(Path(images).iterdir()) if p.is_file()]
+for path in files:
+    cached_sha256(path, database)
+PY
+
 cat > "$CAMPAIGN_DIR/run_manifest.json" <<EOF_MANIFEST
 {
   "campaign_id": "${CAMPAIGN_ID}",
@@ -151,12 +170,12 @@ cat > "$CAMPAIGN_DIR/run_manifest.json" <<EOF_MANIFEST
   "images": "${IMAGES}",
   "methods": [$(printf '"%s",' "${SELECTED[@]}" | sed 's/,$//')],
   "dataset": "MMSpec full test",
-  "sessions": 600,
-  "turns": 723,
-  "repeats": 3,
-  "max_new_tokens": 1024,
-  "gpu_memory_utilization": 0.78,
-  "speculative_tokens": 7,
+  "sessions": ${SESSIONS},
+  "turns": ${TURNS},
+  "repeats": ${REPEATS},
+  "max_new_tokens": ${MAX_NEW_TOKENS},
+  "gpu_memory_utilization": ${GPU_MEM},
+  "speculative_tokens": ${K},
   "code_commit": "$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)",
   "gpu_name": "$(nvidia-smi -i "${GPU_LIST[0]}" --query-gpu=name --format=csv,noheader 2>/dev/null || echo unknown)",
   "exports_and_manifests": "${Q3VL8B_ROOT}/exports (export_receipt.json per method)",
@@ -166,21 +185,15 @@ cat > "$CAMPAIGN_DIR/run_manifest.json" <<EOF_MANIFEST
 }
 EOF_MANIFEST
 
-valid_formal() {
-  "${PYTHONS[$1]}" - "$2" <<'PY'
+# valid_report <report.json> smoke|formal: complete, resource-verified, and for formal the full
+# paired-turn count with the smoke flag off.
+valid_report() {
+  "$PYTHON" - "$1" "$2" "$TIMED_PAIRS" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1]))
-ok=(d.get("status")=="complete" and d.get("resources_verified") is True
-    and d.get("timed_pairs")==2169 and not d.get("smoke",False))
-raise SystemExit(0 if ok else 1)
-PY
-}
-valid_smoke() {
-  "${PYTHONS[$1]}" - "$2" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-ok=(d.get("status")=="complete" and d.get("resources_verified") is True
-    and d.get("smoke",False))
+d=json.load(open(sys.argv[1])); stage=sys.argv[2]
+ok=d.get("status")=="complete" and d.get("resources_verified") is True
+if stage=="formal": ok=ok and d.get("timed_pairs")==int(sys.argv[3]) and not d.get("smoke",False)
+else: ok=ok and d.get("smoke",False)
 raise SystemExit(0 if ok else 1)
 PY
 }
@@ -193,17 +206,21 @@ archive_invalid() {
   mkdir -p "$dir"
 }
 
-upload_method() {
-  local method="$1"
+# hf_put <local path> <name under the campaign prefix> <commit message>; no-op without --publish.
+hf_put() {
   ((PUBLISH)) || return 0
   command -v hf >/dev/null 2>&1 || die "--publish requires the hf CLI"
-  hf upload "$HF_REPO_ID" "$CAMPAIGN_DIR/$method" "$HF_PREFIX/$CAMPAIGN_ID/$method" \
-    --repo-type model --commit-message "eval: Qwen3-VL-8B CONT ${method} MMSpec ${CAMPAIGN_ID}"
+  hf upload "$HF_REPO_ID" "$1" "$HF_PREFIX/$CAMPAIGN_ID/$2" --repo-type model --commit-message "$3"
+}
+
+upload_method() {
+  hf_put "$CAMPAIGN_DIR/$1" "$1" "eval: Qwen3-VL-8B CONT $1 MMSpec ${CAMPAIGN_ID}"
 }
 
 run_stage() {
   local method="$1" stage="$2" gpu="$3" out="$4"; shift 4
-  local py="${PYTHONS[$method]}" stage_dir="$(dirname "$out")"
+  local stage_dir
+  stage_dir="$(dirname "$out")"
   # native-eval keeps per-stage compile caches (many small files) inside its evidence
   # directory, so the run itself lives on node-local scratch; the report and evidence
   # without caches are archived next to $out afterwards.
@@ -213,14 +230,13 @@ run_stage() {
   mkdir -p "$stage_dir"
   rm -rf "$scratch" && mkdir -p "$scratch"
   local -a cmd=(
-    "$py" -u -m vlm_dflash.cli native-eval
-    --target "$TARGET" --draft "${DRAFTS[$method]}"
+    "$PYTHON" -u -m vlm_dflash.cli native-eval
+    --target "$TARGET" --draft "$(draft_of "$method")"
     --source "$SOURCE" --images-dir "$IMAGES"
-    --runtime-manifest "${MANIFESTS[$method]}" --method "$method" --gpu "$gpu"
-    --gpu-memory-utilization .78 --speculative-tokens "${KS[$method]}"
-    --min-pixels 65536 --max-pixels 1048576 --max-model-len 8192
-    --chat-template-kwargs '{"enable_thinking":false}'
-    --system-prompt 'A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human questions.'
+    --runtime-manifest "$(manifest_of "$method")" --method "$method" --gpu "$gpu"
+    --gpu-memory-utilization "$GPU_MEM" --speculative-tokens "$K"
+    --min-pixels "$MIN_PIXELS" --max-pixels "$MAX_PIXELS" --max-model-len "$MAX_MODEL_LEN"
+    --chat-template-kwargs "$TEMPLATE_KWARGS" --system-prompt "$SYSTEM_PROMPT"
     "$@" --out "$local_out"
   )
   printf '%q ' "${cmd[@]}" > "$stage_dir/command.txt"
@@ -232,59 +248,48 @@ run_stage() {
       | tar -C "$stage_dir" -xf -
   fi
   if [[ -f "$local_out" ]]; then cp "$local_out" "$out"; fi
+  rm -rf "$scratch"
   return "$rc"
+}
+
+# run_suite <method> <gpu> smoke|formal <native-eval args...>: skip a valid report on resume,
+# otherwise run the stage; returns non-zero (after recording FAILED_<STAGE>.txt) on failure.
+run_suite() {
+  local method="$1" gpu="$2" stage="$3"; shift 3
+  local dir="$CAMPAIGN_DIR/$method"
+  local stage_dir="$dir/$stage" tag="${stage^^}"
+  local report="$stage_dir/report.json"
+  if ((RESUME)) && [[ -f "$report" ]] && valid_report "$report" "$stage"; then
+    log "SKIP_VALID_${tag} method=$method"
+    return 0
+  fi
+  if [[ -f "$report" ]]; then archive_invalid "$stage_dir"; fi
+  log "RUN_${tag} method=$method gpu=$gpu"
+  if ! run_stage "$method" "$stage" "$gpu" "$report" "$@"; then
+    echo "$stage failed; inspect $stage_dir/report.evidence" > "$dir/FAILED_${tag}.txt"
+    log "${tag}_FAILED method=$method"
+    return 1
+  fi
+  if ! valid_report "$report" "$stage"; then
+    echo "$stage report invalid or resource evidence contaminated; inspect $stage_dir/report.evidence" > "$dir/FAILED_${tag}.txt"
+    log "${tag}_INVALID method=$method"
+    return 1
+  fi
 }
 
 run_method() {
   local method="$1" gpu="$2"
-  local dir="$CAMPAIGN_DIR/$method"
-  mkdir -p "$dir"
-  log "START method=$method gpu=$gpu K=${KS[$method]}"
-
-  if [[ "$SUITE" == smoke || "$SUITE" == all ]]; then
-    local smoke_dir="$dir/smoke"
-    local smoke="$smoke_dir/report.json"
-    if ((RESUME)) && [[ -f "$smoke" ]] && valid_smoke "$method" "$smoke"; then
-      log "SKIP_VALID_SMOKE method=$method"
-    else
-      [[ -f "$smoke" ]] && archive_invalid "$smoke_dir"
-      log "RUN_SMOKE method=$method gpu=$gpu"
-      if ! run_stage "$method" smoke "$gpu" "$smoke" --num-prompts 2 --max-new-tokens 128 --repeats 1; then
-        echo "smoke failed; inspect $smoke.evidence" > "$dir/FAILED_SMOKE.txt"
-        log "SMOKE_FAILED method=$method"
-        upload_method "$method"
-        return 0
-      fi
-      if ! valid_smoke "$method" "$smoke"; then
-        echo "smoke report invalid; inspect $smoke.evidence" > "$dir/FAILED_SMOKE.txt"
-        log "SMOKE_INVALID method=$method"
-        upload_method "$method"
-        return 0
-      fi
-    fi
+  mkdir -p "$CAMPAIGN_DIR/$method"
+  log "START method=$method gpu=$gpu K=$K"
+  if [[ "$SUITE" == smoke || "$SUITE" == all ]] &&
+      ! run_suite "$method" "$gpu" smoke --num-prompts 2 --max-new-tokens 128 --repeats 1; then
+    upload_method "$method"
+    return 0
   fi
-
-  if [[ "$SUITE" == formal || "$SUITE" == all ]]; then
-    local formal_dir="$dir/formal"
-    local formal="$formal_dir/report.json"
-    if ((RESUME)) && [[ -f "$formal" ]] && valid_formal "$method" "$formal"; then
-      log "SKIP_VALID_FORMAL method=$method"
-    else
-      [[ -f "$formal" ]] && archive_invalid "$formal_dir"
-      log "RUN_FORMAL method=$method gpu=$gpu"
-      if ! run_stage "$method" formal "$gpu" "$formal" --num-prompts 600 --max-new-tokens 1024 --repeats 3; then
-        echo "formal failed; inspect $formal.evidence" > "$dir/FAILED_FORMAL.txt"
-        log "FORMAL_FAILED method=$method"
-        upload_method "$method"
-        return 0
-      fi
-      if ! valid_formal "$method" "$formal"; then
-        echo "formal report invalid or resource evidence contaminated; inspect $formal.evidence" > "$dir/FAILED_FORMAL.txt"
-        log "FORMAL_INVALID method=$method"
-        upload_method "$method"
-        return 0
-      fi
-    fi
+  if [[ "$SUITE" == formal || "$SUITE" == all ]] &&
+      ! run_suite "$method" "$gpu" formal --num-prompts "$SESSIONS" --max-new-tokens "$MAX_NEW_TOKENS" --repeats "$REPEATS"; then
+    upload_method "$method"
+    return 0
   fi
   upload_method "$method"
   log "COMPLETE method=$method gpu=$gpu"
@@ -304,28 +309,26 @@ done
 wait
 
 "$PYTHON" - "$CAMPAIGN_DIR" > "$CAMPAIGN_DIR/summary.csv" <<'PY'
-import csv,glob,json,os,sys
+import csv,json,os,sys
 root=sys.argv[1]
 fields=["method","status","sessions","turns","repeats","timed_pairs","speedup_sum_ar_over_sd","ci_low","ci_high","ar_seconds","sd_seconds","error"]
 rows=[]
 manifest=json.load(open(os.path.join(root,"run_manifest.json")))
 for method in manifest["methods"]:
     p=os.path.join(root,method,"formal","report.json")
+    row=dict.fromkeys(fields,None); row["method"]=method
     if os.path.isfile(p):
-        d=json.load(open(p)); ci=d.get("session_cluster_CI95") or d.get("bootstrap_ci95") or {}
-        if isinstance(ci,(list,tuple)) and len(ci)>=2: low,high=ci[0],ci[1]
-        elif isinstance(ci,dict): low,high=ci.get("low"),ci.get("high")
-        else: low=high=None
-        rows.append({"method":method,"status":d.get("status"),"sessions":d.get("sessions"),"turns":d.get("turns"),"repeats":d.get("repeats"),"timed_pairs":d.get("timed_pairs"),"speedup_sum_ar_over_sd":d.get("speedup_sum_ar_over_sd"),"ci_low":low,"ci_high":high,"ar_seconds":d.get("ar_seconds"),"sd_seconds":d.get("sd_seconds"),"error":d.get("error")})
+        d=json.load(open(p))
+        row.update({k:d.get(k) for k in fields if k in d})
+        row["ci_low"],row["ci_high"]=d.get("session_cluster_CI95") or (None,None)
     else:
         failed=os.path.join(root,method,"FAILED_FORMAL.txt")
-        rows.append({"method":method,"status":"failed_or_missing","sessions":None,"turns":None,"repeats":None,"timed_pairs":None,"speedup_sum_ar_over_sd":None,"ci_low":None,"ci_high":None,"ar_seconds":None,"sd_seconds":None,"error":open(failed).read().strip() if os.path.isfile(failed) else "formal report missing"})
+        row["status"]="failed_or_missing"
+        row["error"]=open(failed).read().strip() if os.path.isfile(failed) else "formal report missing"
+    rows.append(row)
 w=csv.DictWriter(sys.stdout,fieldnames=fields); w.writeheader(); w.writerows(rows)
 PY
 
-if ((PUBLISH)); then
-  command -v hf >/dev/null 2>&1 || die "--publish requires the hf CLI"
-  hf upload "$HF_REPO_ID" "$CAMPAIGN_DIR/summary.csv" "$HF_PREFIX/$CAMPAIGN_ID/summary.csv" --repo-type model --commit-message "eval: summary ${CAMPAIGN_ID}"
-  hf upload "$HF_REPO_ID" "$CAMPAIGN_DIR/run_manifest.json" "$HF_PREFIX/$CAMPAIGN_ID/run_manifest.json" --repo-type model --commit-message "eval: manifest ${CAMPAIGN_ID}"
-fi
+hf_put "$CAMPAIGN_DIR/summary.csv" summary.csv "eval: summary ${CAMPAIGN_ID}"
+hf_put "$CAMPAIGN_DIR/run_manifest.json" run_manifest.json "eval: manifest ${CAMPAIGN_ID}"
 log "CAMPAIGN_COMPLETE id=$CAMPAIGN_ID results=$CAMPAIGN_DIR"

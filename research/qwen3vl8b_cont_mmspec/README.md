@@ -1,9 +1,9 @@
-# Qwen3-VL-8B CONT seven-method MMSpec evaluation (A800 port)
+# Qwen3-VL-8B CONT seven-method MMSpec evaluation (portable runner)
 
 [AGENTS.md](AGENTS.md) is the task handoff written for the A6000 evaluation machine. That machine's
-native exports, runtime manifests and frozen runtime are not available here, so this directory
-rebuilds them for an 8×A800 node and runs the same `vlm-dflash native-eval` protocol on the
-seven CONT finals (75,000 original + 50,000 continuation updates, step 125,000).
+native exports, runtime manifests and frozen runtime are not part of the repository, so this
+directory rebuilds them from the CONT checkpoints and runs the same `vlm-dflash native-eval`
+protocol on the seven CONT finals (75,000 original + 50,000 continuation updates, step 125,000).
 
 ## Contents
 
@@ -31,19 +31,19 @@ Q3VL8B_SITE=<site.env> bash research/qwen3vl8b_cont_mmspec/scripts/run_qwen3vl8b
 ```
 
 ```bash
-Q3VL8B_SITE=<site.env> bash research/qwen3vl8b_cont_mmspec/scripts/run_qwen3vl8b_cont_mmspec.sh --gpus 0,1,2,3,4,5,6 --methods all --suite all
+Q3VL8B_SITE=<site.env> bash research/qwen3vl8b_cont_mmspec/scripts/run_qwen3vl8b_cont_mmspec.sh --gpus 0,1,2,3 --methods all --suite all
 ```
 
 ## Differences from the A6000 handoff
 
 | Item | Handoff | Here |
 | --- | --- | --- |
-| Hardware | A6000 | A800 80GB; speeds are not comparable across the two |
+| Hardware | A6000 | site GPU, recorded as `gpu_name` in `run_manifest.json`; speeds are only comparable within one GPU type |
 | Runtime | `runtime_frozen_v1` (vLLM 0.22.1) | a separately installed vLLM 0.22.1 environment; the adapter checks the four reviewed vLLM source files by SHA256 |
 | Exports and manifests | prepared on the A6000 machine | rebuilt from the CONT `ckpt_final.pt` by `prepare_exports.sh` |
 | DSpark | K=8 in a dedicated environment | K=7: the adapter verifies the trained block of 8 (anchor + 7 draft queries) through the official DFlash proposer, as for the other six methods |
 | Domino | blocked (no reviewed manifest) | runs through `native/head_adapters.py` (anchor-slot drafting, prefix GRU, correction head) |
-| GPU ownership | PID mode | count mode: nvidia-smi reports host PIDs inside the pod, so each card may hold the client context plus one engine core |
+| GPU ownership | PID mode | count mode by default, for container PID namespaces where nvidia-smi reports host PIDs: each card may hold the client context plus one engine core (`VELADRAFT_GPU_OWNERSHIP=pid` restores PID mode) |
 
 Everything else follows the handoff: batch 1, greedy, `max_new_tokens` 1024 with natural EOS,
 three repeats, `gpu_memory_utilization` 0.78 for AR and SD, PIECEWISE SD graphs, MMSpec full test
