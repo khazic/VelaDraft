@@ -204,8 +204,14 @@ upload_method() {
 run_stage() {
   local method="$1" stage="$2" gpu="$3" out="$4"; shift 4
   local py="${PYTHONS[$method]}" stage_dir="$(dirname "$out")"
+  # native-eval keeps per-stage compile caches (many small files) inside its evidence
+  # directory, so the run itself lives on node-local scratch; the report and evidence
+  # without caches are archived next to $out afterwards.
+  local scratch="$SHM/runs/$CAMPAIGN_ID/$method/$stage"
+  local local_out="$scratch/$(basename "$out")" rc=0
   wait_for_gpu "$gpu"
   mkdir -p "$stage_dir"
+  rm -rf "$scratch" && mkdir -p "$scratch"
   local -a cmd=(
     "$py" -u -m vlm_dflash.cli native-eval
     --target "$TARGET" --draft "${DRAFTS[$method]}"
@@ -215,11 +221,18 @@ run_stage() {
     --min-pixels 65536 --max-pixels 1048576 --max-model-len 8192
     --chat-template-kwargs '{"enable_thinking":false}'
     --system-prompt 'A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human questions.'
-    "$@" --out "$out"
+    "$@" --out "$local_out"
   )
   printf '%q ' "${cmd[@]}" > "$stage_dir/command.txt"
   printf '\n' >> "$stage_dir/command.txt"
-  "${cmd[@]}" > "$stage_dir/stdout.log" 2>&1
+  "${cmd[@]}" > "$stage_dir/stdout.log" 2>&1 || rc=$?
+  local evidence="${local_out%.json}.evidence"
+  if [[ -d "$evidence" ]]; then
+    tar -C "$scratch" --exclude='*/cache' --exclude='*/inductor' -cf - "$(basename "$evidence")" \
+      | tar -C "$stage_dir" -xf -
+  fi
+  if [[ -f "$local_out" ]]; then cp "$local_out" "$out"; fi
+  return "$rc"
 }
 
 run_method() {
